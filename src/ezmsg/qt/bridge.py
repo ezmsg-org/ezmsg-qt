@@ -7,11 +7,10 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
-from qtpy import QtCore
-from qtpy import QtWidgets
-
 from ezmsg.core.graphcontext import GraphContext
 from ezmsg.core.netprotocol import AddressType
+from qtpy import QtCore
+from qtpy import QtWidgets
 
 if TYPE_CHECKING:
     from .publisher import EzPublisher
@@ -172,9 +171,7 @@ class EzGuiBridge:
         ez_sub._sub = sub
 
         # Start receive loop
-        asyncio.create_task(
-            self._subscriber_loop(ez_sub, sub), name=f"sub-{topic_str}"
-        )
+        asyncio.create_task(self._subscriber_loop(ez_sub, sub), name=f"sub-{topic_str}")
 
     async def _setup_publisher(self, ez_pub: EzPublisher) -> None:
         """Setup a single publisher."""
@@ -184,15 +181,16 @@ class EzGuiBridge:
         ez_pub._pub = pub
 
         # Start publish loop
-        asyncio.create_task(
-            self._publisher_loop(ez_pub, pub), name=f"pub-{topic_str}"
-        )
+        asyncio.create_task(self._publisher_loop(ez_pub, pub), name=f"pub-{topic_str}")
 
     async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
         """Receive messages and emit Qt signals."""
+        logger.debug(f"Subscriber loop started for {ez_sub.topic}")
         try:
             while self._running:
+                logger.debug(f"Waiting for message on {ez_sub.topic}...")
                 msg = await sub.recv()
+                logger.debug(f"Received message on {ez_sub.topic}: {msg}")
 
                 # Thread-safe emit to Qt main thread
                 QtCore.QMetaObject.invokeMethod(
@@ -202,12 +200,15 @@ class EzGuiBridge:
                     QtCore.Q_ARG(object, msg),
                 )
         except asyncio.CancelledError:
-            pass
+            logger.debug(f"Subscriber loop cancelled for {ez_sub.topic}")
         except Exception:
             logger.exception(f"Error in subscriber loop for {ez_sub.topic}")
 
     async def _publisher_loop(self, ez_pub: EzPublisher, pub) -> None:
         """Check queue and broadcast messages."""
+        import queue as queue_module
+
+        logger.debug(f"Publisher loop started for {ez_pub.topic}")
         try:
             while self._running:
                 try:
@@ -215,12 +216,13 @@ class EzGuiBridge:
                     msg = await asyncio.get_event_loop().run_in_executor(
                         None, lambda: ez_pub._queue.get(timeout=0.1)
                     )
+                    logger.debug(f"Broadcasting message on {ez_pub.topic}: {msg}")
                     await pub.broadcast(msg)
-                except Exception:
+                except queue_module.Empty:
                     # Queue.get timeout - continue loop
                     pass
         except asyncio.CancelledError:
-            pass
+            logger.debug(f"Publisher loop cancelled for {ez_pub.topic}")
         except Exception:
             logger.exception(f"Error in publisher loop for {ez_pub.topic}")
 

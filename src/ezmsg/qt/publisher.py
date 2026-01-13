@@ -6,6 +6,8 @@ from typing import Any
 
 from qtpy import QtCore
 
+from .bridge import _register_endpoint
+
 
 class EzPublisher(QtCore.QObject):
     """
@@ -40,8 +42,6 @@ class EzPublisher(QtCore.QObject):
         self._queue: queue.Queue[Any] = queue.Queue()
 
         # Register with the active bridge (or queue for later)
-        from .bridge import _register_endpoint
-
         _register_endpoint(self)
 
     @property

@@ -3,14 +3,16 @@ name = "ezmsg-qt"
 version = "0.1.0"
 description = "Qt integration for ezmsg with direct topic-based pub/sub"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10.15"
 dependencies = [
-  "ezmsg>=3.5.0",
+  "ezmsg @ file:///Users/peranpl1/Documents/repos/oss/ezmsg",
   "qtpy>=2.4.1",
 ]
 
 [project.optional-dependencies]
-pyqt6 = ["pyqt6>=6.0.0"]
+pyqt6 = [
+    "pyqt6>=6.0.0",
+]
 pyside6 = ["pyside6>=6.0.0"]
 
 [tool.ruff]
@@ -35,6 +37,9 @@ order-by-type = false
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ezmsg"]

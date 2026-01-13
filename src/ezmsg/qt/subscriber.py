@@ -1,10 +1,12 @@
 """EzSubscriber - Receive messages from ezmsg topics in Qt widgets."""
 
+from collections.abc import Callable
 from enum import Enum
 from typing import Any
-from typing import Callable
 
 from qtpy import QtCore
+
+from .bridge import _register_endpoint
 
 
 class EzSubscriber(QtCore.QObject):
@@ -41,8 +43,6 @@ class EzSubscriber(QtCore.QObject):
         self._sub = None  # Set by EzGuiBridge during setup
 
         # Register with the active bridge (or queue for later)
-        from .bridge import _register_endpoint
-
         _register_endpoint(self)
 
     @property
@@ -59,6 +59,7 @@ class EzSubscriber(QtCore.QObject):
         """
         self.received.connect(slot)
 
+    @QtCore.Slot(object)
     def _on_message(self, msg: Any) -> None:
         """Internal slot called from background thread via QMetaObject.invokeMethod."""
         self.received.emit(msg)
