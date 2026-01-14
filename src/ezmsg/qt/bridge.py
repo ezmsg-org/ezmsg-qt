@@ -15,6 +15,7 @@ from qtpy import QtCore
 from qtpy import QtWidgets
 
 if TYPE_CHECKING:
+    from .chain import ProcessorChain
     from .publisher import EzPublisher
     from .subscriber import EzSubscriber
 
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 # Global state for self-registration
 _active_bridge: EzGuiBridge | None = None
 _pending_endpoints: list[EzSubscriber | EzPublisher] = []
+_pending_chains: list[ProcessorChain] = []
+
+
+def _register_chain(chain: ProcessorChain) -> None:
+    """Register a processor chain with the active bridge or queue for later."""
+    if _active_bridge is not None:
+        _active_bridge._register_chain(chain)
+    else:
+        _pending_chains.append(chain)
 
 
 def _register_endpoint(endpoint: EzSubscriber | EzPublisher) -> None:
@@ -79,6 +89,8 @@ class EzGuiBridge:
         self._wakeup_sock_r: socket.socket | None = None
         self._wakeup_sock_w: socket.socket | None = None
         self._wakeup_prev_fd: int | None = None
+        self._chains: list[ProcessorChain] = []
+        self._chain_counter: int = 0
 
     def __enter__(self) -> EzGuiBridge:
         """Start async infrastructure and connect channels."""
@@ -91,6 +103,11 @@ class EzGuiBridge:
         for endpoint in _pending_endpoints:
             self._register(endpoint)
         _pending_endpoints.clear()
+
+        # Process any pending chains created before bridge started
+        for chain in _pending_chains:
+            self._register_chain(chain)
+        _pending_chains.clear()
 
         # Start background asyncio thread
         self._thread = threading.Thread(
@@ -144,6 +161,22 @@ class EzGuiBridge:
                 asyncio.run_coroutine_threadsafe(
                     self._setup_publisher(endpoint), self._loop
                 )
+
+    def _register_chain(self, chain: ProcessorChain) -> None:
+        """Register a processor chain for setup."""
+        from .chain import ProcessorChain
+
+        chain._chain_id = f"chain_{self._chain_counter}"
+        self._chain_counter += 1
+        self._chains.append(chain)
+
+        # If already running, set up immediately
+        if self._running and self._loop is not None:
+            asyncio.run_coroutine_threadsafe(self._setup_chain(chain), self._loop)
+
+    async def _setup_chain(self, chain: ProcessorChain) -> None:
+        """Set up a processor chain (placeholder for Task 5)."""
+        pass  # Will be implemented in Task 5
 
     def _install_sigint_handler(self) -> None:
         try:
