@@ -264,14 +264,17 @@ class EzGuiBridge:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-        # Set up auto-gating if enabled
+        # Set up auto-gating if enabled (must be done on Qt main thread)
         if chain.auto_gate and chain.parent_widget is not None and has_in_process:
-            self._setup_auto_gate(chain)
+            QtCore.QMetaObject.invokeMethod(
+                self.app,
+                lambda c=chain: self._setup_auto_gate(c),
+                QtCore.Qt.ConnectionType.QueuedConnection,
+            )
 
     def _setup_auto_gate(self, chain: ProcessorChain) -> None:
-        """Install visibility filter for auto-gating."""
+        """Install visibility filter for auto-gating. Must be called on Qt main thread."""
         from .visibility import VisibilityFilter
-        from .gate import GateMessage
 
         widget = chain.parent_widget
         if widget is None:
@@ -352,9 +355,10 @@ class EzGuiBridge:
     async def _run_processor(self, processor, msg):
         """Run a single processor on a message."""
         # Find the subscriber method that has a publisher decorator
-        for name in dir(processor):
-            method = getattr(processor, name)
-            if hasattr(method, "_ez_subscribers") and hasattr(method, "_ez_publishers"):
+        # Use type().__dict__ to avoid triggering ezmsg property getters
+        for name, attr in type(processor).__dict__.items():
+            if callable(attr) and hasattr(attr, "_ez_subscribers") and hasattr(attr, "_ez_publishers"):
+                method = getattr(processor, name)
                 async for item in method(msg):
                     yield item
                 return
