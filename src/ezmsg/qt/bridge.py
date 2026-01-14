@@ -9,6 +9,7 @@ import socket
 import threading
 from typing import TYPE_CHECKING
 
+from ezmsg.core.backend import GraphRunner
 from ezmsg.core.graphcontext import GraphContext
 from ezmsg.core.netprotocol import AddressType
 from qtpy import QtCore
@@ -91,6 +92,7 @@ class EzGuiBridge:
         self._wakeup_prev_fd: int | None = None
         self._chains: list[ProcessorChain] = []
         self._chain_counter: int = 0
+        self._sidecar: GraphRunner | None = None
 
     def __enter__(self) -> EzGuiBridge:
         """Start async infrastructure and connect channels."""
@@ -174,41 +176,93 @@ class EzGuiBridge:
         if self._running and self._loop is not None:
             asyncio.run_coroutine_threadsafe(self._setup_chain(chain), self._loop)
 
+    async def _setup_chains(self) -> None:
+        """Set up all processor chains including sidecar."""
+        from .sidecar import build_sidecar_components
+
+        if not self._chains:
+            return
+
+        # Assign chain IDs if not already set
+        for chain in self._chains:
+            if chain._chain_id is None:
+                chain._chain_id = f"chain_{self._chain_counter}"
+                self._chain_counter += 1
+
+        # Build sidecar components for in_process stages
+        components, connections = build_sidecar_components(self._chains)
+
+        if components:
+            # Start sidecar GraphRunner
+            self._sidecar = GraphRunner(
+                components=components,
+                connections=connections,
+                graph_address=self._context.graph_address,
+            )
+            self._sidecar.start()
+            logger.info(f"Started sidecar with {len(components)} components")
+
+        # Set up each chain (bridge-thread stages + output subscription)
+        for chain in self._chains:
+            await self._setup_chain(chain)
+
     async def _setup_chain(self, chain: ProcessorChain) -> None:
         """Set up a processor chain."""
-        from .chain import ProcessorChain
-
         if not chain.stages or chain.handler is None:
-            # Empty chain or no handler - nothing to do
             return
 
-        # For now, only handle bridge-thread processors (in_process=False)
-        # Sidecar support will be added in Task 6
+        has_in_process = any(s.in_process for s in chain.stages)
         bridge_stages = [s for s in chain.stages if not s.in_process]
 
-        if not bridge_stages:
-            # All stages are in_process - handled by sidecar (Task 6)
-            return
+        if has_in_process:
+            # Subscribe to sidecar output topic
+            output_topic = f"_qt.{chain._chain_id}.out"
 
-        # Create processor instances
-        processors = []
-        for stage in bridge_stages:
-            unit = stage.unit_class()
-            if stage.settings:
-                unit.apply_settings(stage.settings)
-            await unit.initialize()
-            processors.append(unit)
+            if bridge_stages:
+                # Need to run bridge stages after sidecar output
+                processors = []
+                for stage in bridge_stages:
+                    unit = stage.unit_class()
+                    if stage.settings:
+                        unit.apply_settings(stage.settings)
+                    await unit.initialize()
+                    processors.append(unit)
 
-        # Subscribe to source topic and run through processors
-        source_topic = str(chain.source_topic)
-        sub = await self._context.subscriber(source_topic)
+                sub = await self._context.subscriber(output_topic)
+                task = asyncio.create_task(
+                    self._chain_processor_loop(chain, sub, processors),
+                    name=f"chain-{chain._chain_id}-bridge",
+                )
+            else:
+                # No bridge stages - just subscribe to sidecar output
+                sub = await self._context.subscriber(output_topic)
+                task = asyncio.create_task(
+                    self._chain_output_loop(chain, sub),
+                    name=f"chain-{chain._chain_id}-output",
+                )
 
-        task = asyncio.create_task(
-            self._chain_processor_loop(chain, sub, processors),
-            name=f"chain-{chain._chain_id}",
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+        elif bridge_stages:
+            # All stages in bridge thread
+            processors = []
+            for stage in bridge_stages:
+                unit = stage.unit_class()
+                if stage.settings:
+                    unit.apply_settings(stage.settings)
+                await unit.initialize()
+                processors.append(unit)
+
+            source_topic = str(chain.source_topic)
+            sub = await self._context.subscriber(source_topic)
+
+            task = asyncio.create_task(
+                self._chain_processor_loop(chain, sub, processors),
+                name=f"chain-{chain._chain_id}",
+            )
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     async def _chain_processor_loop(
         self,
@@ -244,6 +298,24 @@ class EzGuiBridge:
             logger.debug(f"Chain loop cancelled for {chain._chain_id}")
         except Exception:
             logger.exception(f"Error in chain loop for {chain._chain_id}")
+
+    async def _chain_output_loop(self, chain: ProcessorChain, sub) -> None:
+        """Receive sidecar output and deliver to Qt handler."""
+        logger.debug(f"Chain output loop started for {chain._chain_id}")
+        try:
+            while self._running:
+                msg = await sub.recv()
+
+                if chain.handler is not None:
+                    QtCore.QMetaObject.invokeMethod(
+                        self.app,
+                        lambda r=msg, h=chain.handler: h(r),
+                        QtCore.Qt.ConnectionType.QueuedConnection,
+                    )
+        except asyncio.CancelledError:
+            logger.debug(f"Chain output loop cancelled for {chain._chain_id}")
+        except Exception:
+            logger.exception(f"Error in chain output loop for {chain._chain_id}")
 
     async def _run_processor(self, processor, msg):
         """Run a single processor on a message."""
@@ -372,9 +444,8 @@ class EzGuiBridge:
         for publisher in self._publishers:
             await self._setup_publisher(publisher)
 
-        # Set up processor chains
-        for chain in self._chains:
-            await self._setup_chain(chain)
+        # Set up processor chains (includes sidecar setup)
+        await self._setup_chains()
 
     async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
         """Setup a single subscriber."""
@@ -474,8 +545,14 @@ class EzGuiBridge:
             logger.exception(f"Error in publisher loop for {ez_pub.topic}")
 
     async def _async_cleanup(self) -> None:
-        """Cleanup all clients."""
+        """Cleanup all clients and sidecar."""
         logger.debug("Cleaning up EzGuiBridge")
+
+        # Stop sidecar first
+        if self._sidecar is not None:
+            self._sidecar.stop()
+            self._sidecar = None
+
         if self._tasks:
             for task in list(self._tasks):
                 task.cancel()
