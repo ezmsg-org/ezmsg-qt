@@ -1,10 +1,18 @@
 # ezmsg-qt
 
-Qt integration for [ezmsg](https://github.com/ezmsg-org/ezmsg) with direct topic-based pub/sub.
+Qt-native pub/sub bridge that connects GUIs to running ezmsg graphs.
 
 ## Overview
 
-`ezmsg-qt` provides a Qt-native interface for connecting widgets to ezmsg topics. Instead of routing all messages through a single multiplexed channel, widgets can subscribe to and publish on specific topics using familiar Qt signal/slot patterns.
+`ezmsg-qt` provides a Qt-native interface for connecting widgets to ezmsg topics.
+Its purpose is to make GUI integration feel like standard Qt signal/slot code
+while still leveraging ezmsg's graph, backpressure, and process isolation.
+Instead of routing all messages through a single multiplexed channel, widgets
+subscribe to and publish on specific topics directly.
+
+When you need extra compute for UI-facing data, EzGuiBridge can also manage a
+local `GraphRunner`, letting you run processing units (including separate
+processes) alongside the GUI while sharing the same GraphServer.
 
 ## Installation
 
@@ -68,6 +76,34 @@ if __name__ == "__main__":
 - `EzGuiBridge` manages a background asyncio thread that handles ezmsg communication
 - Messages are passed between threads using Qt's thread-safe signal mechanism
 - All async complexity is hidden - user code is 100% synchronous
+
+## Local Processing (GraphRunner)
+
+If the GUI needs additional computation, you can run a small ezmsg graph
+alongside the app. Use a `GraphRunner` to launch the processing graph, then
+point the bridge at the runner's graph address.
+
+```python
+from ezmsg.core.backend import GraphRunner
+from ezmsg.qt import EzGuiBridge
+
+runner = GraphRunner(
+    components={"PLOTTER": PlotterCollection()},
+    connections=[
+        (DataTopic.RAW, PlotterCollection.INPUT),
+        (PlotterCollection.OUTPUT, DataTopic.PROCESSED),
+    ],
+    process_components=[PlotterCollection],
+)
+
+runner.start()
+try:
+    with EzGuiBridge(app, graph_address=runner.graph_address):
+        app.exec()
+finally:
+    if runner.running:
+        runner.stop()
+```
 
 ## API Reference
 

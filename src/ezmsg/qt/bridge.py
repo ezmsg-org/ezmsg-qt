@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
+import socket
 import threading
 from typing import TYPE_CHECKING
-
 from ezmsg.core.graphcontext import GraphContext
 from ezmsg.core.netprotocol import AddressType
 from qtpy import QtCore
@@ -62,20 +63,28 @@ class EzGuiBridge:
             graph_address: Optional address of the GraphServer.
         """
         self.app = app
+        self._context_entered = False
         self._context = GraphContext(graph_address)
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._subscribers: list[EzSubscriber] = []
         self._publishers: list[EzPublisher] = []
+        self._tasks: set[asyncio.Task[None]] = set()
         self._shutdown = threading.Event()
         self._setup_complete = threading.Event()
         self._running = False
+        self._prev_sigint_handler = None
+        self._sigint_notifier: QtCore.QSocketNotifier | None = None
+        self._wakeup_sock_r: socket.socket | None = None
+        self._wakeup_sock_w: socket.socket | None = None
+        self._wakeup_prev_fd: int | None = None
 
     def __enter__(self) -> EzGuiBridge:
         """Start async infrastructure and connect channels."""
         global _active_bridge
         _active_bridge = self
         self._running = True
+        self._install_sigint_handler()
 
         # Process any pending endpoints created before bridge started
         for endpoint in _pending_endpoints:
@@ -94,10 +103,14 @@ class EzGuiBridge:
 
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, exc_type, exc, exc_tb) -> bool | None:
         """Cleanup channels and stop async thread."""
         global _active_bridge
         self._running = False
+        if exc_type is KeyboardInterrupt:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.quit()
 
         # Signal asyncio loop to stop
         self._shutdown.set()
@@ -107,6 +120,9 @@ class EzGuiBridge:
             self._thread.join(timeout=10.0)
 
         _active_bridge = None
+        self._restore_sigint_handler()
+        if exc_type is KeyboardInterrupt:
+            return False
 
     def _register(self, endpoint: EzSubscriber | EzPublisher) -> None:
         """Register an endpoint for connection."""
@@ -128,6 +144,83 @@ class EzGuiBridge:
                     self._setup_publisher(endpoint), self._loop
                 )
 
+    def _install_sigint_handler(self) -> None:
+        try:
+            self._prev_sigint_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._handle_sigint)
+            self._install_signal_wakeup()
+        except (ValueError, RuntimeError) as exc:
+            logger.debug(f"Unable to install SIGINT handler: {exc}")
+
+    def _restore_sigint_handler(self) -> None:
+        self._restore_signal_wakeup()
+        if self._prev_sigint_handler is None:
+            return
+        try:
+            signal.signal(signal.SIGINT, self._prev_sigint_handler)
+        except (ValueError, RuntimeError) as exc:
+            logger.debug(f"Unable to restore SIGINT handler: {exc}")
+        finally:
+            self._prev_sigint_handler = None
+
+    def _handle_sigint(self, sig, frame) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _install_signal_wakeup(self) -> None:
+        if self._sigint_notifier is not None:
+            return
+        try:
+            sock_r, sock_w = socket.socketpair()
+            sock_r.setblocking(False)
+            sock_w.setblocking(False)
+            self._wakeup_prev_fd = signal.set_wakeup_fd(sock_w.fileno())
+            self._wakeup_sock_r = sock_r
+            self._wakeup_sock_w = sock_w
+            self._sigint_notifier = QtCore.QSocketNotifier(
+                sock_r.fileno(), QtCore.QSocketNotifier.Type.Read, self.app
+            )
+            self._sigint_notifier.activated.connect(self._on_signal_wakeup)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.debug(f"Unable to install signal wakeup fd: {exc}")
+            self._restore_signal_wakeup()
+
+    def _restore_signal_wakeup(self) -> None:
+        if self._sigint_notifier is not None:
+            self._sigint_notifier.setEnabled(False)
+            self._sigint_notifier.deleteLater()
+            self._sigint_notifier = None
+        if self._wakeup_prev_fd is not None:
+            try:
+                signal.set_wakeup_fd(self._wakeup_prev_fd)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.debug(f"Unable to restore wakeup fd: {exc}")
+            finally:
+                self._wakeup_prev_fd = None
+        if self._wakeup_sock_r is not None:
+            self._wakeup_sock_r.close()
+            self._wakeup_sock_r = None
+        if self._wakeup_sock_w is not None:
+            self._wakeup_sock_w.close()
+            self._wakeup_sock_w = None
+
+    def _on_signal_wakeup(self, _fd: int) -> None:
+        if self._wakeup_sock_r is None:
+            return
+        got_sigint = False
+        try:
+            while True:
+                data = self._wakeup_sock_r.recv(128)
+                if not data:
+                    break
+                if signal.SIGINT in data:
+                    got_sigint = True
+        except BlockingIOError:
+            pass
+        if got_sigint:
+            self._handle_sigint(signal.SIGINT, None)
+
     def _run_async_loop(self) -> None:
         """Background thread entry point."""
         self._loop = asyncio.new_event_loop()
@@ -143,6 +236,9 @@ class EzGuiBridge:
     async def _async_main(self) -> None:
         """Main async entry point."""
         try:
+            await self._context.__aenter__()
+            self._context_entered = True
+
             # Setup all subscribers and publishers
             await self._async_setup()
             self._setup_complete.set()
@@ -171,7 +267,11 @@ class EzGuiBridge:
         ez_sub._sub = sub
 
         # Start receive loop
-        asyncio.create_task(self._subscriber_loop(ez_sub, sub), name=f"sub-{topic_str}")
+        task = asyncio.create_task(
+            self._subscriber_loop(ez_sub, sub), name=f"sub-{topic_str}"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def _setup_publisher(self, ez_pub: EzPublisher) -> None:
         """Setup a single publisher."""
@@ -181,7 +281,11 @@ class EzGuiBridge:
         ez_pub._pub = pub
 
         # Start publish loop
-        asyncio.create_task(self._publisher_loop(ez_pub, pub), name=f"pub-{topic_str}")
+        task = asyncio.create_task(
+            self._publisher_loop(ez_pub, pub), name=f"pub-{topic_str}"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
         """Receive messages and emit Qt signals."""
@@ -201,6 +305,19 @@ class EzGuiBridge:
                 )
         except asyncio.CancelledError:
             logger.debug(f"Subscriber loop cancelled for {ez_sub.topic}")
+        except GeneratorExit:
+            logger.debug(f"Subscriber loop exiting for {ez_sub.topic}")
+        except RuntimeError as exc:
+            if (
+                not self._running
+                or self._shutdown.is_set()
+                or self._loop is None
+                or self._loop.is_closed()
+                or "Event loop is closed" in str(exc)
+            ):
+                logger.debug(f"Subscriber loop stopping for {ez_sub.topic}: {exc}")
+            else:
+                logger.exception(f"Error in subscriber loop for {ez_sub.topic}")
         except Exception:
             logger.exception(f"Error in subscriber loop for {ez_sub.topic}")
 
@@ -223,10 +340,30 @@ class EzGuiBridge:
                     pass
         except asyncio.CancelledError:
             logger.debug(f"Publisher loop cancelled for {ez_pub.topic}")
+        except GeneratorExit:
+            logger.debug(f"Publisher loop exiting for {ez_pub.topic}")
+        except RuntimeError as exc:
+            if (
+                not self._running
+                or self._shutdown.is_set()
+                or self._loop is None
+                or self._loop.is_closed()
+                or "Event loop is closed" in str(exc)
+            ):
+                logger.debug(f"Publisher loop stopping for {ez_pub.topic}: {exc}")
+            else:
+                logger.exception(f"Error in publisher loop for {ez_pub.topic}")
         except Exception:
             logger.exception(f"Error in publisher loop for {ez_pub.topic}")
 
     async def _async_cleanup(self) -> None:
         """Cleanup all clients."""
         logger.debug("Cleaning up EzGuiBridge")
-        await self._context.revert()
+        if self._tasks:
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks.clear()
+        if self._context_entered:
+            await self._context.__aexit__(None, None, None)
+            self._context_entered = False

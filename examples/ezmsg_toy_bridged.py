@@ -1,40 +1,23 @@
 """
-ezmsg_toy connected to Qt via EzGuiBridge.
+ezmsg_toy connected to Qt via EzGuiBridge + GraphRunner.
 
 This test proves:
-1. ezmsg_toy runs in a background thread
+1. GraphRunner runs ezmsg_toy in a background thread
 2. EzGuiBridge connects a Qt widget to the "GLOBAL_PING_TOPIC"
 3. Messages flow from ezmsg -> Qt via the bridge (subscribe)
 4. Messages flow from Qt -> ezmsg via the bridge (publish)
 """
 
-import ctypes
+import asyncio
+import math
 import sys
-import threading
 import time
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from enum import Enum
 
-from ezmsg_toy import TestSystem, TestSystemSettings
-
 import ezmsg.core as ez
-from ezmsg.core.graphserver import GraphServer
-
-
-def raise_in_thread(thread: threading.Thread, exception: type[BaseException]) -> None:
-    """Raise an exception in another thread."""
-    if thread.ident is None:
-        return
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-        ctypes.c_ulong(thread.ident),
-        ctypes.py_object(exception),
-    )
-    if res > 1:
-        # Reset if more than one thread affected
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread.ident), None)
-
-
-from qtpy import QtCore
+from ezmsg.core.backend import GraphRunner
 from qtpy import QtWidgets
 
 from ezmsg.qt import EzGuiBridge
@@ -50,6 +33,162 @@ class BridgeTopic(Enum):
 
     def __str__(self):
         return self.value
+
+
+@dataclass
+class CombinedMessage:
+    string: str
+    number: float
+
+
+class LFOSettings(ez.Settings):
+    freq: float = 0.2  # Hz, sinus frequency
+    update_rate: float = 2.0  # Hz, update rate
+
+
+class LFO(ez.Unit):
+    SETTINGS = LFOSettings
+
+    OUTPUT = ez.OutputStream(float)
+
+    async def initialize(self) -> None:
+        self.start_time = time.time()
+
+    @ez.publisher(OUTPUT)
+    async def generate(self) -> AsyncGenerator:
+        while True:
+            t = time.time() - self.start_time
+            yield self.OUTPUT, math.sin(2.0 * math.pi * self.SETTINGS.freq * t)
+            await asyncio.sleep(1.0 / self.SETTINGS.update_rate)
+
+
+class MessageGeneratorSettings(ez.Settings):
+    message: str
+
+
+class MessageGenerator(ez.Unit):
+    SETTINGS = MessageGeneratorSettings
+
+    OUTPUT = ez.OutputStream(str)
+
+    @ez.publisher(OUTPUT)
+    async def spawn_message(self) -> AsyncGenerator:
+        while True:
+            await asyncio.sleep(1.0)
+            ez.logger.info(f"Spawning {self.SETTINGS.message}")
+            yield self.OUTPUT, self.SETTINGS.message
+
+
+class DebugOutputSettings(ez.Settings):
+    name: str | None = "Default"
+
+
+class DebugOutput(ez.Unit):
+    SETTINGS = DebugOutputSettings
+
+    INPUT = ez.InputStream(str)
+
+    @ez.subscriber(INPUT)
+    async def on_message(self, message: str) -> None:
+        ez.logger.info(f"Output[{self.SETTINGS.name}]: {message}")
+
+
+class MessageModifierState(ez.State):
+    number: float
+
+
+class MessageModifier(ez.Unit):
+    """Store number input, and append it to message."""
+
+    STATE = MessageModifierState
+
+    MESSAGE = ez.InputStream(str)
+    NUMBER = ez.InputStream(float)
+
+    JOINED = ez.OutputStream(str)
+    REPUB = ez.OutputStream(CombinedMessage)
+
+    async def initialize(self) -> None:
+        self.STATE.number = 0.0
+
+    @ez.subscriber(NUMBER)
+    async def on_number(self, number: float) -> None:
+        self.STATE.number = number
+
+    @ez.subscriber(MESSAGE)
+    @ez.publisher(JOINED)
+    @ez.publisher(REPUB)
+    async def on_message(self, message: str) -> AsyncGenerator:
+        yield self.REPUB, CombinedMessage(string=message, number=self.STATE.number)
+
+        if self.STATE.number is not None:
+            message = f"{message}|{self.STATE.number}"
+
+        yield self.JOINED, message
+
+    @ez.main
+    def blocking_main(self) -> None:
+        for i in range(10):
+            ez.logger.info(i)
+            time.sleep(1.0)
+
+
+class ModifierCollection(ez.Collection):
+    """Subscribe to messages and append the most recent LFO output."""
+
+    INPUT = ez.InputStream(str)
+    OUTPUT = ez.OutputStream(str)
+
+    SIN = LFO()
+    MODIFIER = MessageModifier()
+
+    REPUB_OUT = DebugOutput(DebugOutputSettings(name="REPUB"))
+
+    def configure(self) -> None:
+        self.SIN.apply_settings(LFOSettings(freq=0.1))
+
+    def network(self) -> ez.NetworkDefinition:
+        return (
+            (self.SIN.OUTPUT, self.MODIFIER.NUMBER),
+            (self.INPUT, self.MODIFIER.MESSAGE),
+            (self.MODIFIER.JOINED, self.OUTPUT),
+            (self.MODIFIER.REPUB, self.REPUB_OUT.INPUT),
+        )
+
+
+class TestSystemSettings(ez.Settings):
+    name: str
+
+
+class TestSystem(ez.Collection):
+    SETTINGS = TestSystemSettings
+
+    PING = MessageGenerator()
+    FOO = MessageGenerator()
+
+    MODIFIER_COLLECTION = ModifierCollection()
+
+    PINGSUB1 = DebugOutput()
+    PINGSUB2 = DebugOutput()
+    FOOSUB = DebugOutput()
+
+    def configure(self) -> None:
+        self.PING.apply_settings(MessageGeneratorSettings(message="PING"))
+        self.FOO.apply_settings(MessageGeneratorSettings(message="FOO"))
+        self.PINGSUB1.apply_settings(DebugOutputSettings(name=f"{self.SETTINGS.name}1"))
+        self.PINGSUB2.apply_settings(DebugOutputSettings(name=f"{self.SETTINGS.name}2"))
+
+    def network(self) -> ez.NetworkDefinition:
+        return (
+            (self.PING.OUTPUT, self.PINGSUB1.INPUT),
+            (self.PING.OUTPUT, self.MODIFIER_COLLECTION.INPUT),
+            (self.MODIFIER_COLLECTION.OUTPUT, self.PINGSUB2.INPUT),
+            (self.FOO.OUTPUT, self.FOOSUB.INPUT),
+            (self.PING.OUTPUT, self.FOOSUB.INPUT),
+        )
+
+    def process_components(self):
+        return (self.PING, self.FOOSUB, self.MODIFIER_COLLECTION, self.PINGSUB1)
 
 
 # Simple ezmsg unit that receives messages from Qt
@@ -157,13 +296,6 @@ class BridgedWindow(QtWidgets.QWidget):
 def main():
     print("[Main] Starting...")
 
-    # Start GraphServer explicitly so ezmsg and bridge share it
-    print("[Main] Starting GraphServer...")
-    graph_server = GraphServer()
-    graph_server.start()
-    graph_address = graph_server.address
-    print(f"[Main] GraphServer at {graph_address}")
-
     # Create Qt app
     print("[Main] Creating QApplication...")
     app = QtWidgets.QApplication(sys.argv)
@@ -177,21 +309,13 @@ def main():
     # Create the message receiver unit
     qt_receiver = QtMessageReceiver()
 
-    def run_app():
-        with EzGuiBridge(app, graph_address=graph_address):
-            print("[Main] Bridge active, entering Qt event loop...")
-            app.exec()
-            print("[Main] Qt event loop exited")
-            app.quit()
-            raise ez.NormalTermination
-
-    # Start ezmsg in background thread with same graph address
-    print("[Main] Starting ezmsg in background thread...")
+    print("[Main] Starting GraphRunner...")
     system = TestSystem(TestSystemSettings(name="Bridged"))
-    ez.run(
-        SYSTEM=system,
-        QT_RECEIVER=qt_receiver,
-        graph_address=graph_address,
+    runner = GraphRunner(
+        components={
+            "SYSTEM": system,
+            "QT_RECEIVER": qt_receiver,
+        },
         connections=[
             # ezmsg_toy publishes PING to this topic (Qt subscribes)
             (system.PING.OUTPUT, "GLOBAL_PING_TOPIC"),
@@ -201,8 +325,18 @@ def main():
             (qt_receiver.OUTPUT, "QT_ECHO_TOPIC"),
         ],
         process_components=[system, qt_receiver],
-        main_func=run_app,
     )
+
+    runner.start()
+    try:
+        with EzGuiBridge(app, graph_address=runner.graph_address):
+            print("[Main] Bridge active, entering Qt event loop...")
+            app.exec()
+            print("[Main] Qt event loop exited")
+            app.quit()
+    finally:
+        if runner.running:
+            runner.stop()
 
 
 if __name__ == "__main__":

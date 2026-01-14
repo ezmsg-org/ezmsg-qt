@@ -15,6 +15,9 @@ pyqt6 = [
 ]
 pyside6 = ["pyside6>=6.0.0"]
 
+[tool.uv.sources]
+ezmsg = { git = "https://github.com/ezmsg-org/ezmsg", branch="feat/refactor-run-into-graph-runner" }
+
 [tool.ruff]
 src = ["src"]
 fix = true
