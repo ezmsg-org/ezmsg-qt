@@ -264,6 +264,38 @@ class EzGuiBridge:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
+        # Set up auto-gating if enabled
+        if chain.auto_gate and chain.parent_widget is not None and has_in_process:
+            self._setup_auto_gate(chain)
+
+    def _setup_auto_gate(self, chain: ProcessorChain) -> None:
+        """Install visibility filter for auto-gating."""
+        from .visibility import VisibilityFilter
+        from .gate import GateMessage
+
+        widget = chain.parent_widget
+        if widget is None:
+            return
+
+        def on_visibility(visible: bool) -> None:
+            if self._loop is None or not self._running:
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._send_gate_message(chain, visible), self._loop
+            )
+
+        vf = VisibilityFilter(on_visibility, parent=widget)
+        widget.installEventFilter(vf)
+
+    async def _send_gate_message(self, chain: ProcessorChain, open: bool) -> None:
+        """Send gate control message for a chain."""
+        from .gate import GateMessage
+
+        topic = f"_qt.{chain._chain_id}.gate"
+        pub = await self._context.publisher(topic)
+        await pub.broadcast(GateMessage(open=open))
+        logger.debug(f"Sent gate message to {topic}: open={open}")
+
     async def _chain_processor_loop(
         self,
         chain: ProcessorChain,
