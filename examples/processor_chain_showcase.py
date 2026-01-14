@@ -261,16 +261,11 @@ def main():
             app.exec()
             print("[Main] Qt event loop exited, calling app.quit()...", flush=True)
             app.quit()
-            # Stop runner BEFORE bridge exits - sidecar needs message flow to stop first
-            print("[Main] Stopping runner before bridge exit...", flush=True)
-            if runner.running:
-                runner.stop()
-                print("[Main] Runner stopped", flush=True)
         print("[Main] Bridge context exited", flush=True)
     finally:
         print("[Main] Finally block...", flush=True)
         if runner.running:
-            print("[Main] Stopping runner (fallback)...", flush=True)
+            print("[Main] Stopping runner...", flush=True)
             runner.stop()
             print("[Main] Runner stopped", flush=True)
         else:

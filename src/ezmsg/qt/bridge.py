@@ -155,6 +155,15 @@ class EzGuiBridge:
             if app is not None:
                 app.quit()
 
+        # Stop sidecar FIRST, from main thread (not async context)
+        # This avoids deadlock where sidecar.stop() blocks the event loop,
+        # but sidecar processes need the event loop to process GraphServer notifications
+        if self._sidecar is not None:
+            print("[Bridge] Stopping sidecar...", flush=True)
+            self._sidecar.stop()
+            self._sidecar = None
+            print("[Bridge] Sidecar stopped", flush=True)
+
         # Signal asyncio loop to stop
         print("[Bridge] Setting shutdown event...", flush=True)
         self._shutdown.set()
@@ -642,12 +651,8 @@ class EzGuiBridge:
         logger.debug("Cleaning up EzGuiBridge")
         print("[Bridge] _async_cleanup starting...", flush=True)
 
-        # Stop sidecar first
-        if self._sidecar is not None:
-            print("[Bridge] Stopping sidecar...", flush=True)
-            self._sidecar.stop()
-            self._sidecar = None
-            print("[Bridge] Sidecar stopped", flush=True)
+        # Note: sidecar is stopped in __exit__ (main thread) to avoid deadlock
+        # where sidecar.stop() blocks the event loop that sidecar processes need
 
         if self._tasks:
             print(f"[Bridge] Cancelling {len(self._tasks)} tasks...", flush=True)
