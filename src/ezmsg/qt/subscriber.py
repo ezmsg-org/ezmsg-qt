@@ -3,10 +3,14 @@
 from collections.abc import Callable
 from enum import Enum
 from typing import Any
+from typing import TYPE_CHECKING
 
 from qtpy import QtCore
 
 from .bridge import _register_endpoint
+
+if TYPE_CHECKING:
+    from ezmsg.core.subclient import Subscriber
 
 
 class EzSubscriber(QtCore.QObject):
@@ -28,7 +32,7 @@ class EzSubscriber(QtCore.QObject):
                 self.plot.update(msg)
     """
 
-    received = QtCore.Signal(object)
+    received = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
 
     def __init__(self, topic: Enum, parent: QtCore.QObject | None = None):
         """
@@ -40,7 +44,7 @@ class EzSubscriber(QtCore.QObject):
         """
         super().__init__(parent)
         self._topic = topic
-        self._sub = None  # Set by EzGuiBridge during setup
+        self._sub: Subscriber | None = None  # Set by EzGuiBridge during setup
 
         # Register with the active bridge (or queue for later)
         _register_endpoint(self)
@@ -59,7 +63,7 @@ class EzSubscriber(QtCore.QObject):
         """
         self.received.connect(slot)
 
-    @QtCore.Slot(object)
+    @QtCore.Slot(object)  # pyright: ignore[reportPrivateImportUsage]
     def _on_message(self, msg: Any) -> None:
         """Internal slot called from background thread via QMetaObject.invokeMethod."""
         self.received.emit(msg)

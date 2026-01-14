@@ -3,10 +3,14 @@
 import queue
 from enum import Enum
 from typing import Any
+from typing import TYPE_CHECKING
 
 from qtpy import QtCore
 
 from .bridge import _register_endpoint
+
+if TYPE_CHECKING:
+    from ezmsg.core.pubclient import Publisher
 
 
 class EzPublisher(QtCore.QObject):
@@ -21,7 +25,9 @@ class EzPublisher(QtCore.QObject):
         class MyWidget(QtWidgets.QWidget):
             def __init__(self):
                 super().__init__()
-                self.settings_pub = EzPublisher(VelocityTopic.INPUT_SETTINGS, parent=self)
+                self.settings_pub = EzPublisher(
+                    VelocityTopic.INPUT_SETTINGS, parent=self
+                )
                 self.slider.valueChanged.connect(self.send_settings)
 
             def send_settings(self, value):
@@ -38,7 +44,7 @@ class EzPublisher(QtCore.QObject):
         """
         super().__init__(parent)
         self._topic = topic
-        self._pub = None  # Set by EzGuiBridge during setup
+        self._pub: Publisher | None = None  # Set by EzGuiBridge during setup
         self._queue: queue.Queue[Any] = queue.Queue()
 
         # Register with the active bridge (or queue for later)

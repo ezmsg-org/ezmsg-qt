@@ -8,6 +8,7 @@ import signal
 import socket
 import threading
 from typing import TYPE_CHECKING
+
 from ezmsg.core.graphcontext import GraphContext
 from ezmsg.core.netprotocol import AddressType
 from qtpy import QtCore
@@ -179,7 +180,9 @@ class EzGuiBridge:
             self._wakeup_sock_r = sock_r
             self._wakeup_sock_w = sock_w
             self._sigint_notifier = QtCore.QSocketNotifier(
-                sock_r.fileno(), QtCore.QSocketNotifier.Type.Read, self.app
+                sock_r.fileno(),  # pyright: ignore[reportArgumentType]
+                QtCore.QSocketNotifier.Type.Read,
+                self.app,
             )
             self._sigint_notifier.activated.connect(self._on_signal_wakeup)
         except (OSError, RuntimeError, ValueError) as exc:

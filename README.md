@@ -31,10 +31,12 @@ from enum import Enum, auto
 from qtpy import QtWidgets
 from ezmsg.qt import EzSubscriber, EzPublisher, EzGuiBridge
 
+
 # Define topics (typically in your processing module)
 class VelocityTopic(Enum):
     INPUT_SETTINGS = auto()
     OUTPUT_DATA = auto()
+
 
 class VelocityWidget(QtWidgets.QWidget):
     def __init__(self):
@@ -58,6 +60,7 @@ class VelocityWidget(QtWidgets.QWidget):
     def on_slider(self, value):
         self.settings_pub.emit({"gain": value})
 
+
 def main():
     app = QtWidgets.QApplication([])
     window = VelocityWidget()
@@ -65,6 +68,7 @@ def main():
 
     with EzGuiBridge(app):
         app.exec()
+
 
 if __name__ == "__main__":
     main()

@@ -10,18 +10,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-pyqt6 = [
-    "pyqt6>=6.0.0",
-]
+pyqt6 = ["pyqt6>=6.0.0"]
 pyside6 = ["pyside6>=6.0.0"]
 
 [tool.uv.sources]
-ezmsg = { git = "https://github.com/ezmsg-org/ezmsg", branch="feat/refactor-run-into-graph-runner" }
+ezmsg = { git = "https://github.com/ezmsg-org/ezmsg", branch = "feat/refactor-run-into-graph-runner" }
 
 [tool.ruff]
 src = ["src"]
 fix = true
 show-fixes = true
+
+[tool.pyright.defineConstant]
+PYQT5 = false
+PYSIDE2 = false
+PYQT6 = true
+PYSIDE6 = false
 
 [tool.ruff.lint]
 select = [

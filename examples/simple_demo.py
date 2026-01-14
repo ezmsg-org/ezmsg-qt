@@ -130,7 +130,7 @@ class DemoSystem(ez.Collection):
         self.DOUBLER.apply_settings(DoublerSettings())
 
     def network(self) -> ez.NetworkDefinition:
-        return (
+        return (  # pyright: ignore[reportReturnType]
             (DemoTopic.INPUT, self.DOUBLER.INPUT),
             (self.DOUBLER.OUTPUT, DemoTopic.OUTPUT),
         )
@@ -166,7 +166,7 @@ def main():
     print("[Main] Starting ezmsg system...")
     system = DemoSystem()
     ez_thread = threading.Thread(
-        target=lambda: ez.run(system, graph_address=graph_address),
+        target=lambda: ez.run(DEMO=system, graph_address=graph_address),
         daemon=True,
         name="ezmsg",
     )
