@@ -11,14 +11,15 @@ Demonstrates all features of the processor chains API:
 """
 
 import sys
+from collections.abc import AsyncGenerator
 from enum import Enum
-from typing import AsyncGenerator
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge, EzSubscriber
+from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSubscriber
 
 
 class DataTopic(Enum):
@@ -154,6 +155,7 @@ class ProcessedDataWidget(QtWidgets.QWidget):
         chain.connect(self.on_data)
 
     def on_data(self, status: str):
+        print(f"[ProcessedDataWidget] Received: {status}", flush=True)
         self.result_label.setText(status)
         self.message_count += 1
         self.count_label.setText(f"Messages received: {self.message_count}")
@@ -207,6 +209,7 @@ class RawDataWidget(QtWidgets.QWidget):
         self.sub.connect(self.on_data)
 
     def on_data(self, value: float):
+        print(f"[RawDataWidget] Received: {value:.4f}", flush=True)
         self.result_label.setText(f"Raw: {value:.4f}")
         self.message_count += 1
         self.count_label.setText(f"Messages received: {self.message_count}")
@@ -254,9 +257,25 @@ def main():
 
     try:
         with EzGuiBridge(app, graph_address=runner.graph_address):
+            print("[Main] Bridge active, starting Qt event loop...", flush=True)
             app.exec()
+            print("[Main] Qt event loop exited, calling app.quit()...", flush=True)
+            app.quit()
+            # Stop runner BEFORE bridge exits - sidecar needs message flow to stop first
+            print("[Main] Stopping runner before bridge exit...", flush=True)
+            if runner.running:
+                runner.stop()
+                print("[Main] Runner stopped", flush=True)
+        print("[Main] Bridge context exited", flush=True)
     finally:
-        runner.stop()
+        print("[Main] Finally block...", flush=True)
+        if runner.running:
+            print("[Main] Stopping runner (fallback)...", flush=True)
+            runner.stop()
+            print("[Main] Runner stopped", flush=True)
+        else:
+            print("[Main] Runner already stopped", flush=True)
+    print("[Main] main() complete", flush=True)
 
 
 if __name__ == "__main__":

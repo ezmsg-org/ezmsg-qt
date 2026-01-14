@@ -1,10 +1,13 @@
 """Gate unit for controlling message flow in processor chains."""
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 from typing import AsyncGenerator
 
 import ezmsg.core as ez
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,11 +46,15 @@ class MessageGate(ez.Unit):
 
     async def initialize(self) -> None:
         self.STATE.is_open = self.SETTINGS.start_open
+        logger.debug(f"MessageGate initialized: is_open={self.STATE.is_open}")
 
     @ez.subscriber(INPUT_GATE)
     async def on_gate(self, msg: GateMessage) -> None:
         """Handle gate control messages."""
+        old_state = self.STATE.is_open
         self.STATE.is_open = msg.open
+        logger.info(f"Gate state changed: {old_state} -> {msg.open}")
+        print(f"[Gate] state changed: {old_state} -> {msg.open}", flush=True)
 
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)

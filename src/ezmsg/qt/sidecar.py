@@ -39,6 +39,7 @@ def build_sidecar_components(
 
         chain_id = chain._chain_id
         source_topic = str(chain.source_topic)
+        print(f"[Sidecar] Building for chain {chain_id}, source_topic={source_topic}", flush=True)
 
         # Create gate unit
         gate = MessageGate()

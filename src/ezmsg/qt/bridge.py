@@ -46,11 +46,14 @@ def _register_endpoint(endpoint: EzSubscriber | EzPublisher) -> None:
 
 class _QtSignalDispatcher(QtCore.QObject):
     """Helper class to dispatch calls from background threads to Qt main thread."""
+
     call_signal = QtCore.Signal(object, object)  # (callable, args)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.call_signal.connect(self._on_call, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.call_signal.connect(
+            self._on_call, QtCore.Qt.ConnectionType.QueuedConnection
+        )
 
     def _on_call(self, func, args):
         """Called on Qt main thread."""
@@ -145,6 +148,7 @@ class EzGuiBridge:
     def __exit__(self, exc_type, exc, exc_tb) -> bool | None:
         """Cleanup channels and stop async thread."""
         global _active_bridge
+        print("[Bridge] __exit__ starting...", flush=True)
         self._running = False
         if exc_type is KeyboardInterrupt:
             app = QtWidgets.QApplication.instance()
@@ -152,14 +156,21 @@ class EzGuiBridge:
                 app.quit()
 
         # Signal asyncio loop to stop
+        print("[Bridge] Setting shutdown event...", flush=True)
         self._shutdown.set()
 
         # Wait for background thread
         if self._thread is not None:
+            print("[Bridge] Joining background thread...", flush=True)
             self._thread.join(timeout=10.0)
+            if self._thread.is_alive():
+                print("[Bridge] WARNING: Thread still alive after join timeout!", flush=True)
+            else:
+                print("[Bridge] Thread joined successfully", flush=True)
 
         _active_bridge = None
         self._restore_sigint_handler()
+        print("[Bridge] __exit__ complete", flush=True)
         if exc_type is KeyboardInterrupt:
             return False
 
@@ -296,7 +307,7 @@ class EzGuiBridge:
             self._gate_publishers[chain._chain_id] = gate_pub
 
             # Store chain for deferred visibility filter setup
-            if not hasattr(self, '_deferred_auto_gates'):
+            if not hasattr(self, "_deferred_auto_gates"):
                 self._deferred_auto_gates = []
             self._deferred_auto_gates.append(chain)
 
@@ -329,6 +340,7 @@ class EzGuiBridge:
 
         await pub.broadcast(GateMessage(open=open))
         logger.debug(f"Sent gate message for {chain._chain_id}: open={open}")
+        print(f"Sent gate message for {chain._chain_id}: open={open}")
 
     async def _chain_processor_loop(
         self,
@@ -378,7 +390,7 @@ class EzGuiBridge:
     async def _run_processor(self, processor, msg):
         """Run a single processor on a message."""
         # ezmsg stores decorated methods in the unit's tasks attribute
-        tasks = getattr(processor, 'tasks', {}) or getattr(processor, '_tasks', {})
+        tasks = getattr(processor, "tasks", {}) or getattr(processor, "_tasks", {})
         if tasks:
             # Get the first task method (typically 'process' or similar)
             for name, func in tasks.items():
@@ -387,14 +399,16 @@ class EzGuiBridge:
                     yield item
                 return
         # Fallback: look for any method that could be a processor
-        for name in ['process', 'run', 'execute']:
+        for name in ["process", "run", "execute"]:
             if hasattr(processor, name):
                 method = getattr(processor, name)
                 if callable(method):
                     async for item in method(msg):
                         yield item
                     return
-        logger.warning(f"_run_processor: No task method found in {processor.__class__.__name__}")
+        logger.warning(
+            f"_run_processor: No task method found in {processor.__class__.__name__}"
+        )
 
     def _install_sigint_handler(self) -> None:
         try:
@@ -500,7 +514,7 @@ class EzGuiBridge:
             self._setup_complete.set()
 
             # Now set up deferred auto-gates (Qt main thread is no longer blocked)
-            if hasattr(self, '_deferred_auto_gates'):
+            if hasattr(self, "_deferred_auto_gates"):
                 for chain in self._deferred_auto_gates:
                     # Use signal dispatcher to schedule on Qt main thread
                     self._dispatcher.schedule(self._setup_auto_gate, chain)
@@ -528,7 +542,8 @@ class EzGuiBridge:
     async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
         """Setup a single subscriber."""
         topic_str = str(ez_sub.topic)
-        logger.debug(f"Creating subscriber for {topic_str}")
+        logger.info(f"Creating subscriber for topic: {topic_str}")
+        print(f"[Bridge] Creating subscriber for topic: {topic_str}", flush=True)
         sub = await self._context.subscriber(topic_str)
         ez_sub._sub = sub
 
@@ -625,17 +640,27 @@ class EzGuiBridge:
     async def _async_cleanup(self) -> None:
         """Cleanup all clients and sidecar."""
         logger.debug("Cleaning up EzGuiBridge")
+        print("[Bridge] _async_cleanup starting...", flush=True)
 
         # Stop sidecar first
         if self._sidecar is not None:
+            print("[Bridge] Stopping sidecar...", flush=True)
             self._sidecar.stop()
             self._sidecar = None
+            print("[Bridge] Sidecar stopped", flush=True)
 
         if self._tasks:
+            print(f"[Bridge] Cancelling {len(self._tasks)} tasks...", flush=True)
             for task in list(self._tasks):
                 task.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
+            print("[Bridge] Tasks cancelled", flush=True)
+
         if self._context_entered:
+            print("[Bridge] Exiting graph context...", flush=True)
             await self._context.__aexit__(None, None, None)
             self._context_entered = False
+            print("[Bridge] Graph context exited", flush=True)
+
+        print("[Bridge] _async_cleanup complete", flush=True)
