@@ -175,8 +175,85 @@ class EzGuiBridge:
             asyncio.run_coroutine_threadsafe(self._setup_chain(chain), self._loop)
 
     async def _setup_chain(self, chain: ProcessorChain) -> None:
-        """Set up a processor chain (placeholder for Task 5)."""
-        pass  # Will be implemented in Task 5
+        """Set up a processor chain."""
+        from .chain import ProcessorChain
+
+        if not chain.stages or chain.handler is None:
+            # Empty chain or no handler - nothing to do
+            return
+
+        # For now, only handle bridge-thread processors (in_process=False)
+        # Sidecar support will be added in Task 6
+        bridge_stages = [s for s in chain.stages if not s.in_process]
+
+        if not bridge_stages:
+            # All stages are in_process - handled by sidecar (Task 6)
+            return
+
+        # Create processor instances
+        processors = []
+        for stage in bridge_stages:
+            unit = stage.unit_class()
+            if stage.settings:
+                unit.apply_settings(stage.settings)
+            await unit.initialize()
+            processors.append(unit)
+
+        # Subscribe to source topic and run through processors
+        source_topic = str(chain.source_topic)
+        sub = await self._context.subscriber(source_topic)
+
+        task = asyncio.create_task(
+            self._chain_processor_loop(chain, sub, processors),
+            name=f"chain-{chain._chain_id}",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _chain_processor_loop(
+        self,
+        chain: ProcessorChain,
+        sub,
+        processors: list,
+    ) -> None:
+        """Run messages through bridge-thread processor chain."""
+        logger.debug(f"Chain processor loop started for {chain._chain_id}")
+        try:
+            while self._running:
+                msg = await sub.recv()
+
+                # Run through each processor
+                result = msg
+                for processor in processors:
+                    # Call the processor's subscriber method
+                    async for output_stream, output_msg in self._run_processor(
+                        processor, result
+                    ):
+                        result = output_msg
+                        break  # Take first output
+
+                # Deliver to Qt handler
+                if chain.handler is not None:
+                    QtCore.QMetaObject.invokeMethod(
+                        self.app,
+                        lambda r=result, h=chain.handler: h(r),
+                        QtCore.Qt.ConnectionType.QueuedConnection,
+                    )
+
+        except asyncio.CancelledError:
+            logger.debug(f"Chain loop cancelled for {chain._chain_id}")
+        except Exception:
+            logger.exception(f"Error in chain loop for {chain._chain_id}")
+
+    async def _run_processor(self, processor, msg):
+        """Run a single processor on a message."""
+        # Find the subscriber method that has a publisher decorator
+        for name in dir(processor):
+            method = getattr(processor, name)
+            if hasattr(method, "_ez_subscribers") and hasattr(method, "_ez_publishers"):
+                async for item in method(msg):
+                    yield item
+                return
 
     def _install_sigint_handler(self) -> None:
         try:
@@ -288,12 +365,16 @@ class EzGuiBridge:
             await self._async_cleanup()
 
     async def _async_setup(self) -> None:
-        """Create all pub/sub clients."""
+        """Create all pub/sub clients and processor chains."""
         for subscriber in self._subscribers:
             await self._setup_subscriber(subscriber)
 
         for publisher in self._publishers:
             await self._setup_publisher(publisher)
+
+        # Set up processor chains
+        for chain in self._chains:
+            await self._setup_chain(chain)
 
     async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
         """Setup a single subscriber."""
