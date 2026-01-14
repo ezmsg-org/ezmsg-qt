@@ -111,6 +111,7 @@ class EzGuiBridge:
         self._chain_counter: int = 0
         self._sidecar: GraphRunner | None = None
         self._dispatcher = _QtSignalDispatcher(app)
+        self._gate_publishers: dict[str, object] = {}  # chain_id -> publisher
 
     def __enter__(self) -> EzGuiBridge:
         """Start async infrastructure and connect channels."""
@@ -286,10 +287,15 @@ class EzGuiBridge:
             task.add_done_callback(self._tasks.discard)
 
         # Set up auto-gating if enabled
-        # NOTE: We defer this to after _setup_complete is set, since the main thread
-        # is blocked waiting for setup to complete and can't process Qt events yet.
+        # NOTE: We defer visibility filter setup to after _setup_complete is set,
+        # since the main thread is blocked waiting for setup to complete.
         if chain.auto_gate and chain.parent_widget is not None and has_in_process:
-            # Store chain for deferred auto-gate setup
+            # Pre-create the gate publisher so we can send messages quickly
+            gate_topic = f"_qt.{chain._chain_id}.gate"
+            gate_pub = await self._context.publisher(gate_topic)
+            self._gate_publishers[chain._chain_id] = gate_pub
+
+            # Store chain for deferred visibility filter setup
             if not hasattr(self, '_deferred_auto_gates'):
                 self._deferred_auto_gates = []
             self._deferred_auto_gates.append(chain)
@@ -316,10 +322,13 @@ class EzGuiBridge:
         """Send gate control message for a chain."""
         from .gate import GateMessage
 
-        topic = f"_qt.{chain._chain_id}.gate"
-        pub = await self._context.publisher(topic)
+        pub = self._gate_publishers.get(chain._chain_id)
+        if pub is None:
+            logger.warning(f"No gate publisher for chain {chain._chain_id}")
+            return
+
         await pub.broadcast(GateMessage(open=open))
-        logger.debug(f"Sent gate message to {topic}: open={open}")
+        logger.debug(f"Sent gate message for {chain._chain_id}: open={open}")
 
     async def _chain_processor_loop(
         self,
