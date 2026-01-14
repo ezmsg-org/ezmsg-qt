@@ -44,6 +44,23 @@ def _register_endpoint(endpoint: EzSubscriber | EzPublisher) -> None:
         _pending_endpoints.append(endpoint)
 
 
+class _QtSignalDispatcher(QtCore.QObject):
+    """Helper class to dispatch calls from background threads to Qt main thread."""
+    call_signal = QtCore.Signal(object, object)  # (callable, args)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.call_signal.connect(self._on_call, QtCore.Qt.ConnectionType.QueuedConnection)
+
+    def _on_call(self, func, args):
+        """Called on Qt main thread."""
+        func(*args)
+
+    def schedule(self, func, *args):
+        """Schedule a function call on the Qt main thread."""
+        self.call_signal.emit(func, args)
+
+
 class EzGuiBridge:
     """
     Bridge Qt widgets to ezmsg channels.
@@ -93,6 +110,7 @@ class EzGuiBridge:
         self._chains: list[ProcessorChain] = []
         self._chain_counter: int = 0
         self._sidecar: GraphRunner | None = None
+        self._dispatcher = _QtSignalDispatcher(app)
 
     def __enter__(self) -> EzGuiBridge:
         """Start async infrastructure and connect channels."""
@@ -202,6 +220,9 @@ class EzGuiBridge:
             self._sidecar.start()
             logger.info(f"Started sidecar with {len(components)} components")
 
+            # Wait a bit for sidecar to fully initialize its publishers
+            await asyncio.sleep(0.5)
+
         # Set up each chain (bridge-thread stages + output subscription)
         for chain in self._chains:
             await self._setup_chain(chain)
@@ -264,13 +285,14 @@ class EzGuiBridge:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-        # Set up auto-gating if enabled (must be done on Qt main thread)
+        # Set up auto-gating if enabled
+        # NOTE: We defer this to after _setup_complete is set, since the main thread
+        # is blocked waiting for setup to complete and can't process Qt events yet.
         if chain.auto_gate and chain.parent_widget is not None and has_in_process:
-            QtCore.QMetaObject.invokeMethod(
-                self.app,
-                lambda c=chain: self._setup_auto_gate(c),
-                QtCore.Qt.ConnectionType.QueuedConnection,
-            )
+            # Store chain for deferred auto-gate setup
+            if not hasattr(self, '_deferred_auto_gates'):
+                self._deferred_auto_gates = []
+            self._deferred_auto_gates.append(chain)
 
     def _setup_auto_gate(self, chain: ProcessorChain) -> None:
         """Install visibility filter for auto-gating. Must be called on Qt main thread."""
@@ -314,7 +336,6 @@ class EzGuiBridge:
                 # Run through each processor
                 result = msg
                 for processor in processors:
-                    # Call the processor's subscriber method
                     async for output_stream, output_msg in self._run_processor(
                         processor, result
                     ):
@@ -323,11 +344,7 @@ class EzGuiBridge:
 
                 # Deliver to Qt handler
                 if chain.handler is not None:
-                    QtCore.QMetaObject.invokeMethod(
-                        self.app,
-                        lambda r=result, h=chain.handler: h(r),
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                    )
+                    self._dispatcher.schedule(chain.handler, result)
 
         except asyncio.CancelledError:
             logger.debug(f"Chain loop cancelled for {chain._chain_id}")
@@ -342,11 +359,8 @@ class EzGuiBridge:
                 msg = await sub.recv()
 
                 if chain.handler is not None:
-                    QtCore.QMetaObject.invokeMethod(
-                        self.app,
-                        lambda r=msg, h=chain.handler: h(r),
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                    )
+                    # Use signal dispatcher to schedule on Qt main thread
+                    self._dispatcher.schedule(chain.handler, msg)
         except asyncio.CancelledError:
             logger.debug(f"Chain output loop cancelled for {chain._chain_id}")
         except Exception:
@@ -354,14 +368,24 @@ class EzGuiBridge:
 
     async def _run_processor(self, processor, msg):
         """Run a single processor on a message."""
-        # Find the subscriber method that has a publisher decorator
-        # Use type().__dict__ to avoid triggering ezmsg property getters
-        for name, attr in type(processor).__dict__.items():
-            if callable(attr) and hasattr(attr, "_ez_subscribers") and hasattr(attr, "_ez_publishers"):
+        # ezmsg stores decorated methods in the unit's tasks attribute
+        tasks = getattr(processor, 'tasks', {}) or getattr(processor, '_tasks', {})
+        if tasks:
+            # Get the first task method (typically 'process' or similar)
+            for name, func in tasks.items():
                 method = getattr(processor, name)
                 async for item in method(msg):
                     yield item
                 return
+        # Fallback: look for any method that could be a processor
+        for name in ['process', 'run', 'execute']:
+            if hasattr(processor, name):
+                method = getattr(processor, name)
+                if callable(method):
+                    async for item in method(msg):
+                        yield item
+                    return
+        logger.warning(f"_run_processor: No task method found in {processor.__class__.__name__}")
 
     def _install_sigint_handler(self) -> None:
         try:
@@ -462,7 +486,16 @@ class EzGuiBridge:
 
             # Setup all subscribers and publishers
             await self._async_setup()
+
+            # Signal that setup is complete
             self._setup_complete.set()
+
+            # Now set up deferred auto-gates (Qt main thread is no longer blocked)
+            if hasattr(self, '_deferred_auto_gates'):
+                for chain in self._deferred_auto_gates:
+                    # Use signal dispatcher to schedule on Qt main thread
+                    self._dispatcher.schedule(self._setup_auto_gate, chain)
+                del self._deferred_auto_gates
 
             # Run until shutdown requested
             while not self._shutdown.is_set():
