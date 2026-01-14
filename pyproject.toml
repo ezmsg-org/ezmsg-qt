@@ -12,6 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 pyqt6 = ["pyqt6>=6.0.0"]
 pyside6 = ["pyside6>=6.0.0"]
+test = ["pytest>=7.0.0", "pytest-qt>=4.0.0"]
 
 [tool.uv.sources]
 ezmsg = { git = "https://github.com/ezmsg-org/ezmsg", branch = "feat/refactor-run-into-graph-runner" }
