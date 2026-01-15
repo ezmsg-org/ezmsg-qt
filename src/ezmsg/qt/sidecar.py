@@ -1,4 +1,4 @@
-"""Sidecar GraphRunner for in_process processor stages."""
+"""Sidecar GraphRunner for parallel processor groups."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import ezmsg.core as ez
 
+from .chain import _to_unit
 from .gate import MessageGate
 from .gate import MessageGateSettings
 
@@ -18,6 +19,9 @@ def build_sidecar_components(
 ) -> tuple[dict[str, ez.Unit], list[tuple[str, str]]]:
     """
     Build components and connections for sidecar GraphRunner.
+
+    Creates the ezmsg components needed to run parallel processor groups
+    in a separate process.
 
     Args:
         chains: List of ProcessorChains to process.
@@ -32,16 +36,19 @@ def build_sidecar_components(
         if chain._chain_id is None:
             continue
 
-        # Get in_process stages only
-        in_process_stages = [s for s in chain.stages if s.in_process]
-        if not in_process_stages:
+        # Get parallel groups only
+        parallel_groups = [g for g in chain.groups if g.parallel]
+        if not parallel_groups:
             continue
 
         chain_id = chain._chain_id
         source_topic = str(chain.source_topic)
-        print(f"[Sidecar] Building for chain {chain_id}, source_topic={source_topic}", flush=True)
+        print(
+            f"[Sidecar] Building for chain {chain_id}, source_topic={source_topic}",
+            flush=True,
+        )
 
-        # Create gate unit
+        # Create gate unit (shared for all parallel groups in this chain)
         gate = MessageGate()
         gate.apply_settings(MessageGateSettings(start_open=True))
         gate_name = f"{chain_id}_gate"
@@ -54,19 +61,22 @@ def build_sidecar_components(
         gate_control_topic = f"_qt.{chain_id}.gate"
         connections.append((gate_control_topic, f"{gate_name}/INPUT_GATE"))
 
-        # Create processor units
+        # Track previous output for chaining
         prev_output = f"{gate_name}/OUTPUT"
-        for i, stage in enumerate(in_process_stages):
-            unit = stage.unit_class()
-            if stage.settings:
-                unit.apply_settings(stage.settings)
+        proc_index = 0
 
-            proc_name = f"{chain_id}_proc_{i}"
-            components[proc_name] = unit
+        # Process each parallel group
+        for group in parallel_groups:
+            # Create processor units for this group
+            for spec in group.processors:
+                unit = _to_unit(spec)
+                proc_name = f"{chain_id}_proc_{proc_index}"
+                components[proc_name] = unit
 
-            # Connect previous output to this processor's input
-            connections.append((prev_output, f"{proc_name}/INPUT"))
-            prev_output = f"{proc_name}/OUTPUT"
+                # Connect previous output to this processor's input
+                connections.append((prev_output, f"{proc_name}/INPUT"))
+                prev_output = f"{proc_name}/OUTPUT"
+                proc_index += 1
 
         # Connect final output to chain output topic
         output_topic = f"_qt.{chain_id}.out"

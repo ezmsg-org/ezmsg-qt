@@ -1,15 +1,13 @@
 """Tests for bridge-thread processor execution."""
 
-import asyncio
 from enum import Enum
 from typing import AsyncGenerator
 
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
-from ezmsg.qt.bridge import EzGuiBridge
 from ezmsg.qt.bridge import _pending_chains
-from ezmsg.qt.subscriber import EzSubscriber
+from ezmsg.qt.chain import ProcessorChain
 
 
 class DemoTopic(Enum):
@@ -33,8 +31,10 @@ def test_bridge_registers_chains(qtbot):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     received = []
-    sub = EzSubscriber(DemoTopic.INPUT)
-    chain = sub.process(DoubleProcessor, in_process=False)
+    chain = (
+        ProcessorChain(DemoTopic.INPUT, parent=None)
+        .local(DoubleProcessor)
+    )
     chain.connect(received.append)
 
     assert len(_pending_chains) == 1

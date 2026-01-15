@@ -3,11 +3,12 @@
 Processor Chain Showcase
 
 Demonstrates all features of the processor chains API:
-- Fluent .process() API for chaining processors
-- in_process=True for running in sidecar (parallel processing)
-- in_process=False for running in bridge thread
+- Fluent .parallel() / .local() API for grouping processors
+- .parallel() for running in sidecar (parallel processing)
+- .local() for running in bridge thread
 - Auto-gating: processing stops when widget is hidden (e.g., tab not visible)
-- Mixed chains with both sidecar and bridge stages
+- Mixed chains with both parallel and local groups
+
 """
 
 import sys
@@ -20,6 +21,7 @@ from qtpy import QtWidgets
 
 from ezmsg.qt import EzGuiBridge
 from ezmsg.qt import EzSubscriber
+from ezmsg.qt import ProcessorChain
 
 
 class DataTopic(Enum):
@@ -123,7 +125,7 @@ class ProcessedDataWidget(QtWidgets.QWidget):
 
         # Description
         desc = QtWidgets.QLabel(
-            "Chain: Raw → LowPass (sidecar) → Scale (sidecar) → Threshold (bridge)\n"
+            "Chain: Raw → LowPass (parallel) → Scale (parallel) → Threshold (local)\n"
             "Processing STOPS when this tab is hidden (auto-gating)"
         )
         desc.setWordWrap(True)
@@ -146,13 +148,12 @@ class ProcessedDataWidget(QtWidgets.QWidget):
 
         # Set up processor chain with auto-gating
         # When this widget is hidden (tab switched), processing stops
-        self.sub = EzSubscriber(DataTopic.SENSOR_DATA, parent=self)
-        chain = (
-            self.sub.process(LowPassFilter, in_process=True)  # Sidecar
-            .process(ScaleProcessor, in_process=True)  # Sidecar
-            .process(ThresholdDetector, in_process=False)  # Bridge thread
+        self.chain = (
+            ProcessorChain(DataTopic.SENSOR_DATA, parent=self)
+            .parallel(LowPassFilter, ScaleProcessor)  # Sidecar (grouped)
+            .local(ThresholdDetector)  # Bridge thread
         )
-        chain.connect(self.on_data)
+        self.chain.connect(self.on_data)
 
     def on_data(self, status: str):
         print(f"[ProcessedDataWidget] Received: {status}", flush=True)

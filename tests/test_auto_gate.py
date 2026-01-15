@@ -6,8 +6,7 @@ from typing import AsyncGenerator
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
-from ezmsg.qt.bridge import EzGuiBridge
-from ezmsg.qt.subscriber import EzSubscriber
+from ezmsg.qt.chain import ProcessorChain
 
 
 class DemoTopic(Enum):
@@ -31,9 +30,11 @@ def test_bridge_sets_up_visibility_filter(qtbot):
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
-    # Create subscriber with widget as parent
-    sub = EzSubscriber(DemoTopic.DATA, parent=widget)
-    chain = sub.process(PassthroughProcessor, in_process=True, auto_gate=True)
+    # Create processor chain with widget as parent
+    chain = (
+        ProcessorChain(DemoTopic.DATA, parent=widget, auto_gate=True)
+        .parallel(PassthroughProcessor)
+    )
     chain.connect(lambda x: None)
 
     # Chain should have parent widget set

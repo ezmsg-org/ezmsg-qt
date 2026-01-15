@@ -5,19 +5,22 @@ This package provides Qt widgets that can subscribe to and publish messages
 on ezmsg topics using a familiar Qt signal/slot pattern.
 
 Example:
-    from ezmsg.qt import EzSubscriber, EzPublisher, EzGuiBridge
+    from ezmsg.qt import EzSubscriber, EzPublisher, EzGuiBridge, ProcessorChain
 
     class MyWidget(QtWidgets.QWidget):
         def __init__(self):
             super().__init__()
-            # Simple subscription
+            # Simple subscription (no processing)
             self.data_sub = EzSubscriber(MyTopic.OUTPUT, parent=self)
             self.data_sub.connect(self.on_data)
 
-            # Subscription with processing chain
-            self.processed_sub = EzSubscriber(MyTopic.RAW, parent=self)
-            self.processed_sub.process(MyProcessor, in_process=True) \
-                              .connect(self.on_processed)
+            # Processing chain with parallel (sidecar) and local (bridge) stages
+            self.chain = (
+                ProcessorChain(MyTopic.RAW, parent=self)
+                .parallel(LowPassFilter, ScaleProcessor)  # run in sidecar
+                .local(ThresholdDetector)  # run in bridge thread
+                .connect(self.on_processed)
+            )
 
         def on_data(self, msg):
             pass

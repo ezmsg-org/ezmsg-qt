@@ -250,25 +250,26 @@ class EzGuiBridge:
 
     async def _setup_chain(self, chain: ProcessorChain) -> None:
         """Set up a processor chain."""
-        if not chain.stages or chain.handler is None:
+        from .chain import _to_unit
+
+        if not chain.groups or chain.handler is None:
             return
 
-        has_in_process = any(s.in_process for s in chain.stages)
-        bridge_stages = [s for s in chain.stages if not s.in_process]
+        has_parallel = any(g.parallel for g in chain.groups)
+        local_groups = [g for g in chain.groups if not g.parallel]
 
-        if has_in_process:
+        if has_parallel:
             # Subscribe to sidecar output topic
             output_topic = f"_qt.{chain._chain_id}.out"
 
-            if bridge_stages:
-                # Need to run bridge stages after sidecar output
+            if local_groups:
+                # Need to run local processors after sidecar output
                 processors = []
-                for stage in bridge_stages:
-                    unit = stage.unit_class()
-                    if stage.settings:
-                        unit.apply_settings(stage.settings)
-                    await unit.initialize()
-                    processors.append(unit)
+                for group in local_groups:
+                    for spec in group.processors:
+                        unit = _to_unit(spec)
+                        await unit.initialize()
+                        processors.append(unit)
 
                 sub = await self._context.subscriber(output_topic)
                 task = asyncio.create_task(
@@ -276,7 +277,7 @@ class EzGuiBridge:
                     name=f"chain-{chain._chain_id}-bridge",
                 )
             else:
-                # No bridge stages - just subscribe to sidecar output
+                # No local processors - just subscribe to sidecar output
                 sub = await self._context.subscriber(output_topic)
                 task = asyncio.create_task(
                     self._chain_output_loop(chain, sub),
@@ -286,15 +287,14 @@ class EzGuiBridge:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-        elif bridge_stages:
-            # All stages in bridge thread
+        elif local_groups:
+            # All processors in bridge thread (no parallel groups)
             processors = []
-            for stage in bridge_stages:
-                unit = stage.unit_class()
-                if stage.settings:
-                    unit.apply_settings(stage.settings)
-                await unit.initialize()
-                processors.append(unit)
+            for group in local_groups:
+                for spec in group.processors:
+                    unit = _to_unit(spec)
+                    await unit.initialize()
+                    processors.append(unit)
 
             source_topic = str(chain.source_topic)
             sub = await self._context.subscriber(source_topic)
@@ -309,7 +309,7 @@ class EzGuiBridge:
         # Set up auto-gating if enabled
         # NOTE: We defer visibility filter setup to after _setup_complete is set,
         # since the main thread is blocked waiting for setup to complete.
-        if chain.auto_gate and chain.parent_widget is not None and has_in_process:
+        if chain.auto_gate and chain.parent_widget is not None and has_parallel:
             # Pre-create the gate publisher so we can send messages quickly
             gate_topic = f"_qt.{chain._chain_id}.gate"
             gate_pub = await self._context.publisher(gate_topic)
