@@ -139,7 +139,3 @@ with EzGuiBridge(app, graph_address=None):
 
 - `app`: The QApplication instance
 - `graph_address`: Optional GraphServer address (uses default if not specified)
-
-## Design Document
-
-See [docs/plans/2026-01-13-qt-integration-design.md](docs/plans/2026-01-13-qt-integration-design.md) for the full design specification.
