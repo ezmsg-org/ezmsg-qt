@@ -33,7 +33,8 @@ def _to_unit(spec: ProcessorSpec) -> ez.Unit:
     """Convert a ProcessorSpec to an ez.Unit instance.
 
     Args:
-        spec: A Unit class, (class, settings) tuple, or transformer instance.
+        spec: A Unit instance, Unit class, (class, settings) tuple,
+            or transformer instance.
 
     Returns:
         An instantiated ez.Unit ready for use.
@@ -41,7 +42,10 @@ def _to_unit(spec: ProcessorSpec) -> ez.Unit:
     Raises:
         TypeError: If spec is not a recognized processor type.
     """
-    if isinstance(spec, tuple):
+    if isinstance(spec, ez.Unit):
+        # Already instantiated unit (settings already applied)
+        return spec
+    elif isinstance(spec, tuple):
         # (UnitClass, settings) tuple
         unit_class, settings = spec
         unit = unit_class()

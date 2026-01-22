@@ -14,6 +14,54 @@ if TYPE_CHECKING:
     from .chain import ProcessorChain
 
 
+# Common input/output stream name patterns in order of priority
+_INPUT_STREAM_NAMES = ("INPUT_SIGNAL", "INPUT")
+_OUTPUT_STREAM_NAMES = ("OUTPUT_SIGNAL", "OUTPUT")
+
+
+def _detect_stream_names(unit: ez.Unit) -> tuple[str, str]:
+    """Detect input and output stream names for a unit.
+
+    Checks for common stream name patterns on the unit class.
+    Returns the first matching input/output pair found.
+
+    Args:
+        unit: An instantiated ez.Unit.
+
+    Returns:
+        Tuple of (input_stream_name, output_stream_name).
+
+    Raises:
+        ValueError: If no known stream names are found.
+    """
+    unit_class = type(unit)
+
+    input_name = None
+    for name in _INPUT_STREAM_NAMES:
+        if hasattr(unit_class, name):
+            input_name = name
+            break
+
+    output_name = None
+    for name in _OUTPUT_STREAM_NAMES:
+        if hasattr(unit_class, name):
+            output_name = name
+            break
+
+    if input_name is None:
+        raise ValueError(
+            f"Unit {unit_class.__name__} has no recognized input stream. "
+            f"Expected one of: {_INPUT_STREAM_NAMES}"
+        )
+    if output_name is None:
+        raise ValueError(
+            f"Unit {unit_class.__name__} has no recognized output stream. "
+            f"Expected one of: {_OUTPUT_STREAM_NAMES}"
+        )
+
+    return input_name, output_name
+
+
 def build_sidecar_components(
     chains: list[ProcessorChain],
 ) -> tuple[dict[str, ez.Unit], list[tuple[str, str]]]:
@@ -73,9 +121,12 @@ def build_sidecar_components(
                 proc_name = f"{chain_id}_proc_{proc_index}"
                 components[proc_name] = unit
 
+                # Detect stream names for this unit
+                input_name, output_name = _detect_stream_names(unit)
+
                 # Connect previous output to this processor's input
-                connections.append((prev_output, f"{proc_name}/INPUT"))
-                prev_output = f"{proc_name}/OUTPUT"
+                connections.append((prev_output, f"{proc_name}/{input_name}"))
+                prev_output = f"{proc_name}/{output_name}"
                 proc_index += 1
 
         # Connect final output to chain output topic
