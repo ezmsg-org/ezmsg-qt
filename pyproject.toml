@@ -4,18 +4,12 @@ version = "0.1.0"
 description = "Qt integration for ezmsg with direct topic-based pub/sub"
 readme = "README.md"
 requires-python = ">=3.10.15"
-dependencies = [
-  "ezmsg @ file:///Users/peranpl1/Documents/repos/oss/ezmsg",
-  "qtpy>=2.4.1",
-]
+dependencies = ["ezmsg>=3.7", "qtpy>=2.4.1"]
 
 [project.optional-dependencies]
 pyqt6 = ["pyqt6>=6.0.0"]
 pyside6 = ["pyside6>=6.0.0"]
 test = ["pytest>=7.0.0", "pytest-qt>=4.0.0"]
-
-[tool.uv.sources]
-ezmsg = { git = "https://github.com/ezmsg-org/ezmsg", branch = "dev" }
 
 [tool.ruff]
 src = ["src"]
