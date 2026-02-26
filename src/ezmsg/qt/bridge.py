@@ -17,6 +17,7 @@ from qtpy import QtWidgets
 
 if TYPE_CHECKING:
     from .chain import ProcessorChain
+    from .dynamic import EzDynamicSubscriber
     from .publisher import EzPublisher
     from .subscriber import EzSubscriber
 
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 _active_bridge: EzGuiBridge | None = None
 _pending_endpoints: list[EzSubscriber | EzPublisher] = []
 _pending_chains: list[ProcessorChain] = []
+_pending_dynamic: list[EzDynamicSubscriber] = []
 
 
 def _register_chain(chain: ProcessorChain) -> None:
@@ -42,6 +44,20 @@ def _register_endpoint(endpoint: EzSubscriber | EzPublisher) -> None:
         _active_bridge._register(endpoint)
     else:
         _pending_endpoints.append(endpoint)
+
+
+def _register_dynamic(dyn_sub: EzDynamicSubscriber) -> None:
+    """Register a dynamic subscriber with the active bridge or queue for later."""
+    if _active_bridge is not None:
+        _active_bridge._register_dynamic(dyn_sub)
+    else:
+        _pending_dynamic.append(dyn_sub)
+
+
+def _request_switch(dyn_sub: EzDynamicSubscriber, topic: str) -> None:
+    """Request a topic switch for a dynamic subscriber."""
+    if _active_bridge is not None:
+        _active_bridge._switch_dynamic(dyn_sub, topic)
 
 
 class _QtSignalDispatcher(QtCore.QObject):
@@ -115,6 +131,9 @@ class EzGuiBridge:
         self._sidecar: GraphRunner | None = None
         self._dispatcher = _QtSignalDispatcher(app)
         self._gate_publishers: dict[str, object] = {}  # chain_id -> publisher
+        self._dynamic_subscribers: list[EzDynamicSubscriber] = []
+        self._dynamic_tasks: dict[int, asyncio.Task[None]] = {}  # id(dyn_sub) -> task
+        self._dynamic_subs: dict[int, object] = {}  # id(dyn_sub) -> Subscriber client
 
     def __enter__(self) -> EzGuiBridge:
         """Start async infrastructure and connect channels."""
@@ -132,6 +151,11 @@ class EzGuiBridge:
         for chain in _pending_chains:
             self._register_chain(chain)
         _pending_chains.clear()
+
+        # Process any pending dynamic subscribers created before bridge started
+        for dyn_sub in _pending_dynamic:
+            self._register_dynamic(dyn_sub)
+        _pending_dynamic.clear()
 
         # Start background asyncio thread
         self._thread = threading.Thread(
@@ -205,6 +229,81 @@ class EzGuiBridge:
                 asyncio.run_coroutine_threadsafe(
                     self._setup_publisher(endpoint), self._loop
                 )
+
+    def _register_dynamic(self, dyn_sub: EzDynamicSubscriber) -> None:
+        """Register a dynamic subscriber for connection."""
+        self._dynamic_subscribers.append(dyn_sub)
+
+    def _switch_dynamic(self, dyn_sub: EzDynamicSubscriber, topic: str) -> None:
+        """Schedule a topic switch for a dynamic subscriber. Called from Qt thread."""
+        if self._running and self._loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._setup_dynamic(dyn_sub, topic), self._loop
+            )
+
+    async def _setup_dynamic(
+        self, dyn_sub: EzDynamicSubscriber, topic: str
+    ) -> None:
+        """Switch a dynamic subscriber to a new topic."""
+        key = id(dyn_sub)
+
+        # Cancel existing subscription task
+        old_task = self._dynamic_tasks.pop(key, None)
+        if old_task is not None:
+            old_task.cancel()
+            try:
+                await old_task
+            except asyncio.CancelledError:
+                pass
+
+        # Close old subscriber client
+        old_sub = self._dynamic_subs.pop(key, None)
+        if old_sub is not None:
+            old_sub.close()
+            await old_sub.wait_closed()
+
+        # Create new subscriber and start receive loop
+        sub = await self._context.subscriber(topic)
+        self._dynamic_subs[key] = sub
+
+        task = asyncio.create_task(
+            self._dynamic_subscriber_loop(dyn_sub, sub, topic),
+            name=f"dyn-sub-{topic}",
+        )
+        self._dynamic_tasks[key] = task
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _dynamic_subscriber_loop(
+        self, dyn_sub: EzDynamicSubscriber, sub, topic: str
+    ) -> None:
+        """Receive messages and deliver to a dynamic subscriber."""
+        logger.debug(f"Dynamic subscriber loop started for {topic}")
+        try:
+            while self._running:
+                msg = await sub.recv()
+
+                # Thread-safe delivery to Qt main thread via signal dispatcher
+                self._dispatcher.schedule(dyn_sub._on_message, msg)
+        except asyncio.CancelledError:
+            logger.debug(f"Dynamic subscriber loop cancelled for {topic}")
+        except RuntimeError as exc:
+            if (
+                not self._running
+                or self._shutdown.is_set()
+                or self._loop is None
+                or self._loop.is_closed()
+                or "Event loop is closed" in str(exc)
+            ):
+                logger.debug(
+                    f"Dynamic subscriber loop stopping for {topic}: {exc}"
+                )
+            else:
+                logger.exception(
+                    f"Error in dynamic subscriber loop for {topic}"
+                )
+        except Exception:
+            logger.exception(f"Error in dynamic subscriber loop for {topic}")
 
     def _register_chain(self, chain: ProcessorChain) -> None:
         """Register a processor chain for setup."""
@@ -552,6 +651,11 @@ class EzGuiBridge:
         # Set up processor chains (includes sidecar setup)
         await self._setup_chains()
 
+        # Set up any dynamic subscribers that already have topics
+        for dyn_sub in self._dynamic_subscribers:
+            if dyn_sub.topic is not None:
+                await self._setup_dynamic(dyn_sub, dyn_sub.topic)
+
     async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
         """Setup a single subscriber."""
         topic_str = str(ez_sub.topic)
@@ -679,6 +783,10 @@ class EzGuiBridge:
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
             print("[Bridge] Tasks cancelled", flush=True)
+
+        # Clear dynamic subscriber tracking (clients are closed by context exit)
+        self._dynamic_tasks.clear()
+        self._dynamic_subs.clear()
 
         if self._context_entered:
             print("[Bridge] Exiting graph context...", flush=True)
