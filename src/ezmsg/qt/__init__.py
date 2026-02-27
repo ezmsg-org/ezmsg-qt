@@ -42,6 +42,7 @@ from .gate import GateMessage
 from .gate import MessageGate
 from .gate import MessageGateSettings
 from .publisher import EzPublisher
+from .settings_form import SettingsForm
 from .subscriber import EzSubscriber
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "EzPublisher",
     "EzSubscriber",
     "ProcessorChain",
+    "SettingsForm",
     "GateMessage",
     "MessageGate",
     "MessageGateSettings",

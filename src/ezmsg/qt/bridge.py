@@ -173,7 +173,10 @@ class EzGuiBridge:
             print("[Bridge] Joining background thread...", flush=True)
             self._thread.join(timeout=10.0)
             if self._thread.is_alive():
-                print("[Bridge] WARNING: Thread still alive after join timeout!", flush=True)
+                print(
+                    "[Bridge] WARNING: Thread still alive after join timeout!",
+                    flush=True,
+                )
             else:
                 print("[Bridge] Thread joined successfully", flush=True)
 
@@ -205,8 +208,6 @@ class EzGuiBridge:
 
     def _register_chain(self, chain: ProcessorChain) -> None:
         """Register a processor chain for setup."""
-        from .chain import ProcessorChain
-
         chain._chain_id = f"chain_{self._chain_counter}"
         self._chain_counter += 1
         self._chains.append(chain)
@@ -321,7 +322,10 @@ class EzGuiBridge:
             self._deferred_auto_gates.append(chain)
 
     def _setup_auto_gate(self, chain: ProcessorChain) -> None:
-        """Install visibility filter for auto-gating. Must be called on Qt main thread."""
+        """Install visibility filter for auto-gating.
+
+        Must be called on Qt main thread.
+        """
         from .visibility import VisibilityFilter
 
         widget = chain.parent_widget
@@ -366,7 +370,7 @@ class EzGuiBridge:
                 # Run through each processor
                 result = msg
                 for processor in processors:
-                    async for output_stream, output_msg in self._run_processor(
+                    async for _output_stream, output_msg in self._run_processor(
                         processor, result
                     ):
                         result = output_msg
@@ -402,7 +406,7 @@ class EzGuiBridge:
         tasks = getattr(processor, "tasks", {}) or getattr(processor, "_tasks", {})
         if tasks:
             # Get the first task method (typically 'process' or similar)
-            for name, func in tasks.items():
+            for name, _func in tasks.items():
                 method = getattr(processor, name)
                 async for item in method(msg):
                     yield item
@@ -553,7 +557,14 @@ class EzGuiBridge:
         topic_str = str(ez_sub.topic)
         logger.info(f"Creating subscriber for topic: {topic_str}")
         print(f"[Bridge] Creating subscriber for topic: {topic_str}", flush=True)
-        sub = await self._context.subscriber(topic_str)
+        sub_kwargs: dict[str, object] = {}
+        # Opt-in leaky + queue depth to avoid GUI backpressure on high-rate topics.
+        if getattr(ez_sub, "leaky", False):
+            sub_kwargs["leaky"] = True
+            max_queue = getattr(ez_sub, "max_queue", None)
+            if max_queue is not None:
+                sub_kwargs["max_queue"] = max_queue
+        sub = await self._context.subscriber(topic_str, **sub_kwargs)
         ez_sub._sub = sub
 
         # Start receive loop
@@ -579,6 +590,14 @@ class EzGuiBridge:
 
     async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
         """Receive messages and emit Qt signals."""
+        rate = None
+        throttle_hz = getattr(ez_sub, "throttle_hz", None)
+        if throttle_hz is not None:
+            # Keep reads on time (ROS-style); combined with leaky mode this acts as
+            # a drop/refresh limiter for high-rate topics.
+            from ezmsg.util.rate import Rate
+
+            rate = Rate(float(throttle_hz))
         logger.debug(f"Subscriber loop started for {ez_sub.topic}")
         try:
             while self._running:
@@ -593,6 +612,8 @@ class EzGuiBridge:
                     QtCore.Qt.ConnectionType.QueuedConnection,
                     QtCore.Q_ARG(object, msg),
                 )
+                if rate is not None:
+                    await rate.sleep()
         except asyncio.CancelledError:
             logger.debug(f"Subscriber loop cancelled for {ez_sub.topic}")
         except GeneratorExit:

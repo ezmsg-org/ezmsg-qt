@@ -39,17 +39,38 @@ class EzSubscriber(QtCore.QObject):
 
     received = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
 
-    def __init__(self, topic: Enum, parent: QtCore.QObject | None = None):
+    def __init__(
+        self,
+        topic: Enum,
+        parent: QtCore.QObject | None = None,
+        *,
+        leaky: bool = False,
+        max_queue: int | None = None,
+        throttle_hz: float | None = None,
+    ):
         """
         Create a subscriber for an ezmsg topic.
 
         Args:
             topic: The topic enum to subscribe to.
             parent: Optional parent QObject for lifecycle management.
+            leaky: If True, the underlying ezmsg Subscriber will drop old messages
+                if the receiver can't keep up (no backpressure).
+            max_queue: Queue depth for leaky mode. If None, ezmsg defaults apply.
+            throttle_hz: If set, throttle delivery by reading at most this many
+                messages per second from the underlying ezmsg Subscriber.
         """
         super().__init__(parent)
         self._topic = topic
         self._sub: Subscriber | None = None  # Set by EzGuiBridge during setup
+        self._leaky = bool(leaky)
+        self._max_queue = max_queue
+        self._throttle_hz = throttle_hz
+
+        if self._max_queue is not None and self._max_queue <= 0:
+            raise ValueError("max_queue must be positive")
+        if self._throttle_hz is not None and self._throttle_hz <= 0:
+            raise ValueError("throttle_hz must be positive")
 
         # Register with the active bridge (or queue for later)
         _register_endpoint(self)
@@ -58,6 +79,21 @@ class EzSubscriber(QtCore.QObject):
     def topic(self) -> Enum:
         """The topic this subscriber is bound to."""
         return self._topic
+
+    @property
+    def leaky(self) -> bool:
+        """Whether this subscriber drops old messages instead of backpressure."""
+        return self._leaky
+
+    @property
+    def max_queue(self) -> int | None:
+        """Leaky notification queue depth (ignored if leaky=False)."""
+        return self._max_queue
+
+    @property
+    def throttle_hz(self) -> float | None:
+        """If set, throttle reads from the underlying ezmsg Subscriber."""
+        return self._throttle_hz
 
     def connect(self, slot: Callable[[Any], None]) -> None:
         """
