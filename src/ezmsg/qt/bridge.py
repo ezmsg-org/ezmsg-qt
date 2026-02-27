@@ -605,15 +605,12 @@ class EzGuiBridge:
                 msg = await sub.recv()
                 logger.debug(f"Received message on {ez_sub.topic}: {msg}")
 
-                # Thread-safe emit to Qt main thread
-                QtCore.QMetaObject.invokeMethod(
-                    ez_sub,
-                    "_on_message",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(object, msg),
-                )
+                # Thread-safe delivery to Qt main thread via signal dispatcher
+                # (QMetaObject.invokeMethod + Q_ARG(object, ...) fails on PySide6)
+                self._dispatcher.schedule(ez_sub._on_message, msg)
                 if rate is not None:
                     await rate.sleep()
+
         except asyncio.CancelledError:
             logger.debug(f"Subscriber loop cancelled for {ez_sub.topic}")
         except GeneratorExit:
