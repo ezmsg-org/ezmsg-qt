@@ -7,9 +7,14 @@ requires-python = ">=3.10.15"
 dependencies = ["ezmsg>=3.7", "qtpy>=2.4.1"]
 
 [project.optional-dependencies]
+examples = [
+    "ezmsg-baseproc",
+    "fastplotlib>=0.6.1",
+    "numpy>=2.0.0",
+]
 pyqt6 = ["pyqt6>=6.0.0"]
 pyside6 = ["pyside6>=6.0.0"]
-test = ["pytest>=7.0.0", "pytest-qt>=4.0.0"]
+test = ["numpy>=2.0.0", "pytest>=7.0.0", "pytest-qt>=4.0.0"]
 
 [tool.ruff]
 src = ["src"]
