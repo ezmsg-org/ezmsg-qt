@@ -38,6 +38,7 @@ Example:
 
 from .bridge import EzGuiBridge
 from .chain import ProcessorChain
+from .dynamic import EzDynamicSubscriber
 from .gate import GateMessage
 from .gate import MessageGate
 from .gate import MessageGateSettings
@@ -46,6 +47,7 @@ from .settings_form import SettingsForm
 from .subscriber import EzSubscriber
 
 __all__ = [
+    "EzDynamicSubscriber",
     "EzGuiBridge",
     "EzPublisher",
     "EzSubscriber",
