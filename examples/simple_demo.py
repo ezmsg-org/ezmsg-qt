@@ -12,8 +12,11 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from enum import auto
 from enum import Enum
+import os
+import time
 
 import ezmsg.core as ez
+from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
@@ -52,7 +55,6 @@ class Doubler(ez.Unit):
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)
     async def on_input(self, msg: NumberMessage) -> AsyncGenerator:
-        print(f"on_input: {msg}")
         result = NumberMessage(value=msg.value * 2)
         yield self.OUTPUT, result
 
@@ -61,7 +63,7 @@ class Doubler(ez.Unit):
 class DemoWidget(QtWidgets.QWidget):
     """Widget that sends numbers and displays doubled results."""
 
-    def __init__(self, parent=None):
+    def __init__(self, bridge: EzGuiBridge, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ezmsg-qt Demo")
 
@@ -91,8 +93,8 @@ class DemoWidget(QtWidgets.QWidget):
         layout.addWidget(self.log)
 
         # Create ezmsg connections
-        self.number_pub = EzPublisher(DemoTopic.INPUT, parent=self)
-        self.result_sub = EzSubscriber(DemoTopic.OUTPUT, parent=self)
+        self.number_pub = EzPublisher(DemoTopic.INPUT, parent=self, bridge=bridge)
+        self.result_sub = EzSubscriber(DemoTopic.OUTPUT, parent=self, bridge=bridge)
 
         # Connect signals
         self.send_btn.clicked.connect(self.on_send)
@@ -112,7 +114,6 @@ class DemoWidget(QtWidgets.QWidget):
 
     def _log(self, text: str):
         self.log.append(text)
-        print(f"[DemoWidget] {text}")  # Also print to console for debugging
 
 
 # --- ezmsg System ---
@@ -138,48 +139,36 @@ class DemoSystem(ez.Collection):
 
 # --- Main ---
 def main():
-    import threading
-    import time
-
-    from ezmsg.core.graphserver import GraphServer
-
     print("[Main] Starting...")
-
-    # Start GraphServer explicitly so we know the address
-    graph_server = GraphServer()
-    graph_server.start()
-    graph_address = graph_server.address
-    print(f"[Main] GraphServer started at {graph_address}")
 
     # Create Qt app
     print("[Main] Creating QApplication...")
     app = QtWidgets.QApplication(sys.argv)
 
-    # Create widget (this registers EzSubscriber/EzPublisher with pending list)
+    print("[Main] Starting ezmsg system...")
+    runner = GraphRunner(components={"DEMO": DemoSystem()})
+    runner.start()
+    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+
+    # Create widget and attach Qt endpoints explicitly
     print("[Main] Creating DemoWidget...")
-    widget = DemoWidget()
+    widget = DemoWidget(bridge)
     widget.resize(400, 300)
     widget.show()
     print("[Main] Widget shown")
-
-    # Run ezmsg system in background thread with the same graph address
-    print("[Main] Starting ezmsg system...")
-    system = DemoSystem()
-    ez_thread = threading.Thread(
-        target=lambda: ez.run(DEMO=system, graph_address=graph_address),
-        daemon=True,
-        name="ezmsg",
-    )
-    ez_thread.start()
 
     # Give ezmsg time to connect
     print("[Main] Waiting for ezmsg to start...")
     time.sleep(1.0)
 
-    # Run Qt with ezmsg bridge - uses the same GraphServer
+    # Run Qt with ezmsg bridge
     print("[Main] Starting EzGuiBridge...")
-    with EzGuiBridge(app, graph_address=graph_address):
+    with bridge:
         print("[Main] EzGuiBridge started, scheduling auto-test...")
+
+        auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
+        if auto_close_ms is not None:
+            QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
 
         # Auto-send a test message after a short delay
         def auto_test():
@@ -194,8 +183,9 @@ def main():
         print("[Main] Qt event loop exited")
 
     # Cleanup
-    print("[Main] Stopping GraphServer...")
-    graph_server.stop()
+    print("[Main] Stopping runner...")
+    if runner.running:
+        runner.stop()
     print("[Main] Done")
 
 

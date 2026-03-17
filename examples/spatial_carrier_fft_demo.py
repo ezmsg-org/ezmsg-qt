@@ -297,8 +297,13 @@ def _require_fastplotlib() -> Any:
 
 
 class SpatialCarrierWidget(QtWidgets.QWidget):
-    def __init__(self, parent: QtWidgets.QWidget | None = None):
+    def __init__(
+        self,
+        bridge: EzGuiBridge,
+        parent: QtWidgets.QWidget | None = None,
+    ):
         super().__init__(parent)
+        self._bridge = bridge
         self._fpl = _require_fastplotlib()
         self.setWindowTitle("Spatial Carrier FFT Demo")
         self._generator_settings = CarrierGeneratorSettings()
@@ -316,15 +321,25 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
 
     def _init_endpoints(self) -> None:
         self._raw_sub = EzSubscriber(
-            CarrierTopic.RAW_IMAGE, parent=self, leaky=True, max_queue=1
+            CarrierTopic.RAW_IMAGE,
+            parent=self,
+            bridge=self._bridge,
+            leaky=True,
+            max_queue=1,
         )
         self._spectrum_sub = EzSubscriber(
-            CarrierTopic.FFT_IMAGE, parent=self, leaky=True, max_queue=1
+            CarrierTopic.FFT_IMAGE,
+            parent=self,
+            bridge=self._bridge,
+            leaky=True,
+            max_queue=1,
         )
         self._generator_settings_pub = EzPublisher(
-            CarrierTopic.GENERATOR_SETTINGS, parent=self
+            CarrierTopic.GENERATOR_SETTINGS, parent=self, bridge=self._bridge
         )
-        self._fft_settings_pub = EzPublisher(CarrierTopic.FFT_SETTINGS, parent=self)
+        self._fft_settings_pub = EzPublisher(
+            CarrierTopic.FFT_SETTINGS, parent=self, bridge=self._bridge
+        )
 
     def _init_controls(self) -> None:
         controls = QtWidgets.QGroupBox("Carrier Controls")
@@ -576,12 +591,12 @@ def build_runner() -> GraphRunner:
         components={"pipeline": pipeline},
         connections=[
             (
-                str(CarrierTopic.GENERATOR_SETTINGS),
+                CarrierTopic.GENERATOR_SETTINGS.name,
                 pipeline.INPUT_GENERATOR_SETTINGS,
             ),
-            (str(CarrierTopic.FFT_SETTINGS), pipeline.INPUT_FFT_SETTINGS),
-            (pipeline.OUTPUT_RAW_IMAGE, str(CarrierTopic.RAW_IMAGE)),
-            (pipeline.OUTPUT_FFT_IMAGE, str(CarrierTopic.FFT_IMAGE)),
+            (CarrierTopic.FFT_SETTINGS.name, pipeline.INPUT_FFT_SETTINGS),
+            (pipeline.OUTPUT_RAW_IMAGE, CarrierTopic.RAW_IMAGE.name),
+            (pipeline.OUTPUT_FFT_IMAGE, CarrierTopic.FFT_IMAGE.name),
         ],
     )
 
@@ -592,18 +607,18 @@ def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(Path(__file__).stem)
 
-    widget = SpatialCarrierWidget()
-    widget.resize(1200, 720)
-    widget.show()
-
     auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
     if auto_close_ms is not None:
         QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
 
     runner = build_runner()
     runner.start()
+    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+    widget = SpatialCarrierWidget(bridge)
+    widget.resize(1200, 720)
+    widget.show()
     try:
-        with EzGuiBridge(app, graph_address=runner.graph_address):
+        with bridge:
             app.exec()
     finally:
         if runner.running:

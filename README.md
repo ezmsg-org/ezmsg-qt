@@ -6,13 +6,13 @@ Qt-native pub/sub bridge that connects GUIs to running ezmsg graphs.
 
 `ezmsg-qt` provides a Qt-native interface for connecting widgets to ezmsg topics.
 Its purpose is to make GUI integration feel like standard Qt signal/slot code
-while still leveraging ezmsg's graph, backpressure, and process isolation.
+while still leveraging ezmsg's graph, backpressure, and sidecar execution.
 Instead of routing all messages through a single multiplexed channel, widgets
 subscribe to and publish on specific topics directly.
 
-When you need extra compute for UI-facing data, EzGuiBridge can also manage a
-local `GraphRunner`, letting you run processing units (including separate
-processes) alongside the GUI while sharing the same GraphServer.
+When you need extra compute for UI-facing data, `EzGuiBridge` can also manage a
+sidecar `GraphRunner`, letting you run processing units off the UI thread while
+sharing the same GraphServer.
 
 ## Installation
 
@@ -39,7 +39,7 @@ class VelocityTopic(Enum):
 
 
 class VelocityWidget(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, bridge: EzGuiBridge):
         super().__init__()
 
         # Create UI
@@ -47,8 +47,16 @@ class VelocityWidget(QtWidgets.QWidget):
         self.label = QtWidgets.QLabel("Waiting for data...")
 
         # Create ezmsg connections
-        self.data_sub = EzSubscriber(VelocityTopic.OUTPUT_DATA, parent=self)
-        self.settings_pub = EzPublisher(VelocityTopic.INPUT_SETTINGS, parent=self)
+        self.data_sub = EzSubscriber(
+            VelocityTopic.OUTPUT_DATA,
+            parent=self,
+            bridge=bridge,
+        )
+        self.settings_pub = EzPublisher(
+            VelocityTopic.INPUT_SETTINGS,
+            parent=self,
+            bridge=bridge,
+        )
 
         # Connect like normal Qt signals
         self.data_sub.connect(self.on_data)
@@ -63,10 +71,11 @@ class VelocityWidget(QtWidgets.QWidget):
 
 def main():
     app = QtWidgets.QApplication([])
-    window = VelocityWidget()
+    bridge = EzGuiBridge(app)
+    window = VelocityWidget(bridge)
     window.show()
 
-    with EzGuiBridge(app):
+    with bridge:
         app.exec()
 
 
@@ -76,7 +85,7 @@ if __name__ == "__main__":
 
 ## How It Works
 
-- `EzSubscriber` and `EzPublisher` are QObjects that register themselves with the `EzGuiBridge`
+- `EzSubscriber` and `EzPublisher` are QObjects attached explicitly to an `EzGuiBridge`
 - `EzGuiBridge` manages a background asyncio thread that handles ezmsg communication
 - Messages are passed between threads using Qt's thread-safe signal mechanism
 - All async complexity is hidden - user code is 100% synchronous
@@ -101,12 +110,35 @@ runner = GraphRunner(
 )
 
 runner.start()
+bridge = EzGuiBridge(app, graph_address=runner.graph_address)
 try:
-    with EzGuiBridge(app, graph_address=runner.graph_address):
+    with bridge:
         app.exec()
 finally:
     if runner.running:
         runner.stop()
+```
+
+## Processor Pipelines
+
+`ProcessorChain` compiles processing stages into a sidecar ezmsg runtime.
+
+- `.parallel(...)` runs a stage group in its own sidecar process
+- `.local(...)` runs a stage group in the shared sidecar process
+- neither mode runs on the Qt UI thread
+
+```python
+from ezmsg.qt import EzGuiBridge, ProcessorChain
+
+bridge = EzGuiBridge(app)
+
+chain = (
+    ProcessorChain(MyTopic.RAW, parent=widget)
+    .parallel(LowPassFilter)
+    .local(ThresholdDetector)
+    .connect(widget.on_processed)
+    .attach(bridge)
+)
 ```
 
 ## API Reference
@@ -118,6 +150,7 @@ EzSubscriber(topic: Enum, parent: QObject = None)
 ```
 
 - `topic`: The topic enum to subscribe to
+- `bridge`: The bridge that owns this subscriber
 - `connect(slot)`: Connect a handler to receive messages
 - `received`: Qt signal emitted when a message arrives
 
@@ -128,14 +161,17 @@ EzPublisher(topic: Enum, parent: QObject = None)
 ```
 
 - `topic`: The topic enum to publish to
+- `bridge`: The bridge that owns this publisher
 - `emit(message)`: Send a message to the topic
 
 ### EzGuiBridge
 
 ```python
-with EzGuiBridge(app, graph_address=None):
+bridge = EzGuiBridge(app, graph_address=None)
+with bridge:
     app.exec()
 ```
 
 - `app`: The QApplication instance
 - `graph_address`: Optional GraphServer address (uses default if not specified)
+- `attach(obj)`: Attach an `EzSubscriber`, `EzPublisher`, or `ProcessorChain`

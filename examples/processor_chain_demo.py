@@ -2,19 +2,21 @@
 """
 Processor Chain Demo
 
-Demonstrates the fluent .process() API for chaining processors
-with optional process isolation.
+Demonstrates compiled processor pipelines with shared and isolated
+sidecar execution stages.
 """
 
 import sys
 from enum import Enum
+import os
 from typing import AsyncGenerator
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
+from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge, EzSubscriber, EzPublisher
+from ezmsg.qt import EzGuiBridge, ProcessorChain
 
 
 class DemoTopic(Enum):
@@ -30,7 +32,6 @@ class DoubleProcessor(ez.Unit):
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)
     async def process(self, msg: float) -> AsyncGenerator:
-        print(f"DoubleProcessor: {msg} -> {msg * 2}")
         yield self.OUTPUT, msg * 2
 
 
@@ -43,7 +44,6 @@ class SquareProcessor(ez.Unit):
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)
     async def process(self, msg: float) -> AsyncGenerator:
-        print(f"SquareProcessor: {msg} -> {msg ** 2}")
         yield self.OUTPUT, msg**2
 
 
@@ -64,7 +64,7 @@ class NumberGenerator(ez.Unit):
 
 
 class DemoWidget(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, bridge: EzGuiBridge):
         super().__init__()
         self.setWindowTitle("Processor Chain Demo")
 
@@ -74,16 +74,16 @@ class DemoWidget(QtWidgets.QWidget):
         self.result_label = QtWidgets.QLabel("Waiting for data...")
         layout.addWidget(self.result_label)
 
-        # Subscribe with processor chain
-        # Chain: NUMBERS -> Double (sidecar) -> Square (bridge) -> display
-        self.sub = EzSubscriber(DemoTopic.NUMBERS, parent=self)
-        chain = self.sub.process(DoubleProcessor, in_process=True)
-        chain.process(SquareProcessor, in_process=False)
-        chain.connect(self.on_result)
+        self.chain = (
+            ProcessorChain(DemoTopic.NUMBERS, parent=self)
+            .parallel(DoubleProcessor)
+            .local(SquareProcessor)
+            .connect(self.on_result)
+            .attach(bridge)
+        )
 
     def on_result(self, value: float):
         self.result_label.setText(f"Result: {value:.2f}")
-        print(f"Widget received: {value}")
 
 
 def main():
@@ -94,17 +94,22 @@ def main():
     runner = GraphRunner(
         components={"gen": generator},
         connections=[
-            (generator.OUTPUT, str(DemoTopic.NUMBERS)),
+            (generator.OUTPUT, DemoTopic.NUMBERS.name),
         ],
     )
     runner.start()
 
+    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+
     # Create widget
-    widget = DemoWidget()
+    widget = DemoWidget(bridge)
     widget.show()
 
     try:
-        with EzGuiBridge(app, graph_address=runner.graph_address):
+        with bridge:
+            auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
+            if auto_close_ms is not None:
+                QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
             app.exec()
     finally:
         runner.stop()

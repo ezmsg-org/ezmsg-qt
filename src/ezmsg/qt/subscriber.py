@@ -9,9 +9,8 @@ from typing import TYPE_CHECKING
 
 from qtpy import QtCore
 
-from .bridge import _register_endpoint
-
 if TYPE_CHECKING:
+    from .bridge import EzGuiBridge
     from ezmsg.core.subclient import Subscriber
 
 
@@ -44,6 +43,7 @@ class EzSubscriber(QtCore.QObject):
         topic: Enum,
         parent: QtCore.QObject | None = None,
         *,
+        bridge: EzGuiBridge | None = None,
         leaky: bool = False,
         max_queue: int | None = None,
         throttle_hz: float | None = None,
@@ -63,6 +63,7 @@ class EzSubscriber(QtCore.QObject):
         super().__init__(parent)
         self._topic = topic
         self._sub: Subscriber | None = None  # Set by EzGuiBridge during setup
+        self._bridge: EzGuiBridge | None = None
         self._leaky = bool(leaky)
         self._max_queue = max_queue
         self._throttle_hz = throttle_hz
@@ -72,13 +73,18 @@ class EzSubscriber(QtCore.QObject):
         if self._throttle_hz is not None and self._throttle_hz <= 0:
             raise ValueError("throttle_hz must be positive")
 
-        # Register with the active bridge (or queue for later)
-        _register_endpoint(self)
+        if bridge is not None:
+            bridge.attach(self)
 
     @property
     def topic(self) -> Enum:
         """The topic this subscriber is bound to."""
         return self._topic
+
+    @property
+    def bridge(self) -> EzGuiBridge | None:
+        """The bridge this subscriber is attached to, if any."""
+        return self._bridge
 
     @property
     def leaky(self) -> bool:
@@ -106,5 +112,10 @@ class EzSubscriber(QtCore.QObject):
 
     @QtCore.Slot(object)  # pyright: ignore[reportPrivateImportUsage]
     def _on_message(self, msg: Any) -> None:
-        """Internal slot called from background thread via QMetaObject.invokeMethod."""
+        """Internal slot called from the Qt signal dispatcher."""
         self.received.emit(msg)
+
+    def _bind_bridge(self, bridge: EzGuiBridge) -> None:
+        if self._bridge is not None and self._bridge is not bridge:
+            raise RuntimeError("EzSubscriber is already attached to a different bridge")
+        self._bridge = bridge

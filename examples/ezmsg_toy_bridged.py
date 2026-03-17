@@ -11,6 +11,7 @@ This test proves:
 import asyncio
 import math
 import sys
+import os
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from enum import Enum
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
+from qtpy import QtCore
 from qtpy import QtWidgets
 
 from ezmsg.qt import EzGuiBridge
@@ -210,7 +212,7 @@ class QtMessageReceiver(ez.Unit):
 class BridgedWindow(QtWidgets.QWidget):
     """Qt window that sends and receives messages via the bridge."""
 
-    def __init__(self, parent=None):
+    def __init__(self, bridge: EzGuiBridge, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ezmsg_toy + EzGuiBridge Test")
 
@@ -257,15 +259,15 @@ class BridgedWindow(QtWidgets.QWidget):
 
         # --- ezmsg connections ---
         # Subscribe to messages from ezmsg_toy
-        self.ping_sub = EzSubscriber(BridgeTopic.FROM_EZMSG, parent=self)
+        self.ping_sub = EzSubscriber(BridgeTopic.FROM_EZMSG, parent=self, bridge=bridge)
         self.ping_sub.connect(self.on_message_received)
 
         # Subscribe to echo responses from QtMessageReceiver
-        self.echo_sub = EzSubscriber(BridgeTopic.ECHO, parent=self)
+        self.echo_sub = EzSubscriber(BridgeTopic.ECHO, parent=self, bridge=bridge)
         self.echo_sub.connect(self.on_echo_received)
 
         # Publish messages to ezmsg
-        self.message_pub = EzPublisher(BridgeTopic.FROM_QT, parent=self)
+        self.message_pub = EzPublisher(BridgeTopic.FROM_QT, parent=self, bridge=bridge)
 
         self._log("Widget initialized")
 
@@ -290,7 +292,6 @@ class BridgedWindow(QtWidgets.QWidget):
 
     def _log(self, text: str):
         self.log.append(text)
-        print(f"[BridgedWindow] {text}")
 
 
 def main():
@@ -299,12 +300,6 @@ def main():
     # Create Qt app
     print("[Main] Creating QApplication...")
     app = QtWidgets.QApplication(sys.argv)
-
-    # Create widget (registers EzSubscriber/EzPublisher with pending list)
-    print("[Main] Creating BridgedWindow...")
-    window = BridgedWindow()
-    window.resize(500, 450)
-    window.show()
 
     # Create the message receiver unit
     qt_receiver = QtMessageReceiver()
@@ -328,8 +323,19 @@ def main():
     )
 
     runner.start()
+    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+
+    # Create widget and attach Qt endpoints explicitly
+    print("[Main] Creating BridgedWindow...")
+    window = BridgedWindow(bridge)
+    window.resize(500, 450)
+    window.show()
+
     try:
-        with EzGuiBridge(app, graph_address=runner.graph_address):
+        with bridge:
+            auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
+            if auto_close_ms is not None:
+                QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
             print("[Main] Bridge active, entering Qt event loop...")
             app.exec()
             print("[Main] Qt event loop exited")

@@ -54,7 +54,6 @@ class MessageGate(ez.Unit):
         old_state = self.STATE.is_open
         self.STATE.is_open = msg.open
         logger.info(f"Gate state changed: {old_state} -> {msg.open}")
-        print(f"[Gate] state changed: {old_state} -> {msg.open}", flush=True)
 
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)

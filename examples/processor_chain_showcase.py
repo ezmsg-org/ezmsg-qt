@@ -5,7 +5,7 @@ Processor Chain Showcase
 Demonstrates all features of the processor chains API:
 - Fluent .parallel() / .local() API for grouping processors
 - .parallel() for running in sidecar (parallel processing)
-- .local() for running in bridge thread
+- .local() for running in the shared sidecar process
 - Auto-gating: processing stops when widget is hidden (e.g., tab not visible)
 - Mixed chains with both parallel and local groups
 
@@ -14,9 +14,11 @@ Demonstrates all features of the processor chains API:
 import sys
 from collections.abc import AsyncGenerator
 from enum import Enum
+import os
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
+from qtpy import QtCore
 from qtpy import QtWidgets
 
 from ezmsg.qt import EzGuiBridge
@@ -115,7 +117,7 @@ class SensorSimulator(ez.Unit):
 class ProcessedDataWidget(QtWidgets.QWidget):
     """Widget showing processed sensor data with auto-gating."""
 
-    def __init__(self, parent=None):
+    def __init__(self, bridge: EzGuiBridge, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -151,12 +153,12 @@ class ProcessedDataWidget(QtWidgets.QWidget):
         self.chain = (
             ProcessorChain(DataTopic.SENSOR_DATA, parent=self)
             .parallel(LowPassFilter, ScaleProcessor)  # Sidecar (grouped)
-            .local(ThresholdDetector)  # Bridge thread
+            .local(ThresholdDetector)
+            .connect(self.on_data)
+            .attach(bridge)
         )
-        self.chain.connect(self.on_data)
 
     def on_data(self, status: str):
-        print(f"[ProcessedDataWidget] Received: {status}", flush=True)
         self.result_label.setText(status)
         self.message_count += 1
         self.count_label.setText(f"Messages received: {self.message_count}")
@@ -182,7 +184,7 @@ class ProcessedDataWidget(QtWidgets.QWidget):
 class RawDataWidget(QtWidgets.QWidget):
     """Widget showing raw sensor data (no processing)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, bridge: EzGuiBridge, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -206,11 +208,10 @@ class RawDataWidget(QtWidgets.QWidget):
         layout.addStretch()
 
         # Direct subscription without processor chain
-        self.sub = EzSubscriber(DataTopic.SENSOR_DATA, parent=self)
+        self.sub = EzSubscriber(DataTopic.SENSOR_DATA, parent=self, bridge=bridge)
         self.sub.connect(self.on_data)
 
     def on_data(self, value: float):
-        print(f"[RawDataWidget] Received: {value:.4f}", flush=True)
         self.result_label.setText(f"Raw: {value:.4f}")
         self.message_count += 1
         self.count_label.setText(f"Messages received: {self.message_count}")
@@ -219,7 +220,7 @@ class RawDataWidget(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QMainWindow):
     """Main window with tabbed interface to demonstrate auto-gating."""
 
-    def __init__(self):
+    def __init__(self, bridge: EzGuiBridge):
         super().__init__()
         self.setWindowTitle("Processor Chains Showcase")
         self.setMinimumSize(500, 400)
@@ -229,14 +230,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(tabs)
 
         # Add tabs
-        tabs.addTab(ProcessedDataWidget(), "Processed (Auto-Gated)")
-        tabs.addTab(RawDataWidget(), "Raw Data")
+        tabs.addTab(ProcessedDataWidget(bridge), "Processed (Auto-Gated)")
+        tabs.addTab(RawDataWidget(bridge), "Raw Data")
 
         # Instructions
-        self.statusBar().showMessage(
-            "Switch tabs to see auto-gating in action - "
-            "processed data stops updating when tab is hidden"
-        )
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(
+                "Switch tabs to see auto-gating in action - "
+                "processed data stops updating when tab is hidden"
+            )
 
 
 def main():
@@ -247,17 +250,22 @@ def main():
     runner = GraphRunner(
         components={"sensor": simulator},
         connections=[
-            (simulator.OUTPUT, str(DataTopic.SENSOR_DATA)),
+            (simulator.OUTPUT, DataTopic.SENSOR_DATA.name),
         ],
     )
     runner.start()
 
+    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+
     # Create main window
-    window = MainWindow()
+    window = MainWindow(bridge)
     window.show()
 
     try:
-        with EzGuiBridge(app, graph_address=runner.graph_address):
+        with bridge:
+            auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
+            if auto_close_ms is not None:
+                QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
             print("[Main] Bridge active, starting Qt event loop...", flush=True)
             app.exec()
             print("[Main] Qt event loop exited, calling app.quit()...", flush=True)

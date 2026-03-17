@@ -1,4 +1,4 @@
-"""Tests for bridge-thread processor execution."""
+"""Tests for processor pipeline attachment."""
 
 from enum import Enum
 from typing import AsyncGenerator
@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
-from ezmsg.qt.bridge import _pending_chains
+from ezmsg.qt.bridge import EzGuiBridge
 from ezmsg.qt.chain import ProcessorChain
 
 
@@ -25,19 +25,17 @@ class DoubleProcessor(ez.Unit):
 
 
 def test_bridge_registers_chains(qtbot):
-    """EzGuiBridge processes pending chains on enter."""
-    _pending_chains.clear()
-
+    """EzGuiBridge attaches fully configured pipelines explicitly."""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    bridge = EzGuiBridge(app)
 
     received = []
     chain = (
         ProcessorChain(DemoTopic.INPUT, parent=None)
         .local(DoubleProcessor)
+        .connect(received.append)
+        .attach(bridge)
     )
-    chain.connect(received.append)
 
-    assert len(_pending_chains) == 1
-
-    # Note: Full integration test requires running GraphServer
-    # This test verifies registration works
+    assert chain.bridge is bridge
+    assert chain.attached is True

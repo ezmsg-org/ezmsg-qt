@@ -1,12 +1,18 @@
-"""Sidecar GraphRunner for parallel processor groups."""
+"""Sidecar runtime compilation for processor pipelines."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
+from typing import Any
 
 import ezmsg.core as ez
+from ezmsg.core.collection import NetworkDefinition
 
+from .chain import ProcessorGroup
 from .chain import _to_unit
+from .gate import GateMessage
 from .gate import MessageGate
 from .gate import MessageGateSettings
 
@@ -14,39 +20,29 @@ if TYPE_CHECKING:
     from .chain import ProcessorChain
 
 
-# Common input/output stream name patterns in order of priority
 _INPUT_STREAM_NAMES = ("INPUT_SIGNAL", "INPUT")
 _OUTPUT_STREAM_NAMES = ("OUTPUT_SIGNAL", "OUTPUT")
 
 
+def normalize_topic(topic: str | Enum) -> str:
+    """Normalize public topic inputs to ezmsg core semantics."""
+    if isinstance(topic, Enum):
+        return topic.name
+    if isinstance(topic, str):
+        return topic
+    raise TypeError(f"Unsupported topic type: {type(topic)!r}")
+
+
 def _detect_stream_names(unit: ez.Unit) -> tuple[str, str]:
-    """Detect input and output stream names for a unit.
-
-    Checks for common stream name patterns on the unit class.
-    Returns the first matching input/output pair found.
-
-    Args:
-        unit: An instantiated ez.Unit.
-
-    Returns:
-        Tuple of (input_stream_name, output_stream_name).
-
-    Raises:
-        ValueError: If no known stream names are found.
-    """
     unit_class = type(unit)
 
-    input_name = None
-    for name in _INPUT_STREAM_NAMES:
-        if hasattr(unit_class, name):
-            input_name = name
-            break
-
-    output_name = None
-    for name in _OUTPUT_STREAM_NAMES:
-        if hasattr(unit_class, name):
-            output_name = name
-            break
+    input_name = next(
+        (name for name in _INPUT_STREAM_NAMES if hasattr(unit_class, name)), None
+    )
+    output_name = next(
+        (name for name in _OUTPUT_STREAM_NAMES if hasattr(unit_class, name)),
+        None,
+    )
 
     if input_name is None:
         raise ValueError(
@@ -62,75 +58,132 @@ def _detect_stream_names(unit: ez.Unit) -> tuple[str, str]:
     return input_name, output_name
 
 
-def build_sidecar_components(
-    chains: list[ProcessorChain],
-) -> tuple[dict[str, ez.Unit], list[tuple[str, str]]]:
-    """
-    Build components and connections for sidecar GraphRunner.
+class ProcessorGroupCollection(ez.Collection):
+    """Collection wrapper for a processor group."""
 
-    Creates the ezmsg components needed to run parallel processor groups
-    in a separate process.
+    INPUT = ez.InputStream(Any)
+    OUTPUT = ez.OutputStream(Any)
 
-    Args:
-        chains: List of ProcessorChains to process.
+    def __init__(self, processors: list[Any]):
+        super().__init__()
+        self._ordered_processors: list[tuple[str, ez.Unit]] = []
 
-    Returns:
-        Tuple of (components dict, connections list).
-    """
-    components: dict[str, ez.Unit] = {}
-    connections: list[tuple[str, str]] = []
+        for index, spec in enumerate(processors):
+            unit = _to_unit(spec)
+            name = f"proc_{index}"
+            unit._set_name(name)
+            self._components[name] = unit
+            setattr(self, name, unit)
+            self._ordered_processors.append((name, unit))
 
-    for chain in chains:
-        if chain._chain_id is None:
-            continue
+    def network(self) -> NetworkDefinition:
+        edges: list[tuple[Any, Any]] = []
+        previous: Any = self.INPUT
 
-        # Get parallel groups only
-        parallel_groups = [g for g in chain.groups if g.parallel]
-        if not parallel_groups:
-            continue
+        for _name, unit in self._ordered_processors:
+            input_name, output_name = _detect_stream_names(unit)
+            edges.append((previous, getattr(unit, input_name)))
+            previous = getattr(unit, output_name)
 
-        chain_id = chain._chain_id
-        source_topic = str(chain.source_topic)
-        print(
-            f"[Sidecar] Building for chain {chain_id}, source_topic={source_topic}",
-            flush=True,
+        edges.append((previous, self.OUTPUT))
+        return edges
+
+
+class PipelineCollection(ez.Collection):
+    """Collection wrapper for one compiled processor pipeline."""
+
+    INPUT = ez.InputStream(Any)
+    OUTPUT = ez.OutputStream(Any)
+    INPUT_GATE = ez.InputStream(GateMessage)
+
+    def __init__(self, groups: list[ProcessorGroup]):
+        super().__init__()
+        self._group_collections: list[tuple[str, ProcessorGroupCollection, str]] = []
+
+        gate = MessageGate(MessageGateSettings(start_open=True))
+        gate._set_name("gate")
+        self._gate = gate
+        self._components["gate"] = gate
+        setattr(self, "gate", gate)
+
+        for index, group in enumerate(groups):
+            collection = ProcessorGroupCollection(group.processors)
+            name = f"group_{index}"
+            collection._set_name(name)
+            self._components[name] = collection
+            setattr(self, name, collection)
+            self._group_collections.append((name, collection, group.mode))
+
+    def network(self) -> NetworkDefinition:
+        edges: list[tuple[Any, Any]] = [
+            (self.INPUT, self._gate.INPUT),
+            (self.INPUT_GATE, self._gate.INPUT_GATE),
+        ]
+        previous: Any = self._gate.OUTPUT
+
+        for _name, collection, _mode in self._group_collections:
+            edges.append((previous, collection.INPUT))
+            previous = collection.OUTPUT
+
+        edges.append((previous, self.OUTPUT))
+        return edges
+
+    def process_components(self) -> tuple[ez.Component, ...]:
+        return tuple(
+            collection
+            for _name, collection, mode in self._group_collections
+            if mode == "process"
         )
 
-        # Create gate unit (shared for all parallel groups in this chain)
-        gate = MessageGate()
-        gate.apply_settings(MessageGateSettings(start_open=True))
-        gate_name = f"{chain_id}_gate"
-        components[gate_name] = gate
 
-        # Connect source topic to gate input
-        connections.append((source_topic, f"{gate_name}/INPUT"))
+@dataclass(frozen=True)
+class CompiledPipeline:
+    """Bridge-facing metadata for a compiled pipeline."""
 
-        # Connect gate control topic
-        gate_control_topic = f"_qt.{chain_id}.gate"
-        connections.append((gate_control_topic, f"{gate_name}/INPUT_GATE"))
+    chain: ProcessorChain
+    component_name: str
+    source_topic: str
+    output_topic: str
+    gate_topic: str
+    component: PipelineCollection
 
-        # Track previous output for chaining
-        prev_output = f"{gate_name}/OUTPUT"
-        proc_index = 0
 
-        # Process each parallel group
-        for group in parallel_groups:
-            # Create processor units for this group
-            for spec in group.processors:
-                unit = _to_unit(spec)
-                proc_name = f"{chain_id}_proc_{proc_index}"
-                components[proc_name] = unit
+def build_sidecar_components(
+    chains: list[ProcessorChain],
+) -> tuple[
+    dict[str, PipelineCollection], list[tuple[Any, Any]], list[CompiledPipeline]
+]:
+    """Compile pipelines into a sidecar GraphRunner definition."""
+    components: dict[str, PipelineCollection] = {}
+    connections: list[tuple[Any, Any]] = []
+    compiled: list[CompiledPipeline] = []
 
-                # Detect stream names for this unit
-                input_name, output_name = _detect_stream_names(unit)
-
-                # Connect previous output to this processor's input
-                connections.append((prev_output, f"{proc_name}/{input_name}"))
-                prev_output = f"{proc_name}/{output_name}"
-                proc_index += 1
-
-        # Connect final output to chain output topic
+    for index, chain in enumerate(chains):
+        chain._validate()
+        chain_id = chain._chain_id or f"chain_{index}"
+        component_name = f"pipeline_{chain_id}"
         output_topic = f"_qt.{chain_id}.out"
-        connections.append((prev_output, output_topic))
+        gate_topic = f"_qt.{chain_id}.gate"
+        source_topic = normalize_topic(chain.source_topic)
 
-    return components, connections
+        component = PipelineCollection(chain.groups)
+        components[component_name] = component
+        connections.extend(
+            [
+                (source_topic, component.INPUT),
+                (gate_topic, component.INPUT_GATE),
+                (component.OUTPUT, output_topic),
+            ]
+        )
+        compiled.append(
+            CompiledPipeline(
+                chain=chain,
+                component_name=component_name,
+                source_topic=source_topic,
+                output_topic=output_topic,
+                gate_topic=gate_topic,
+                component=component,
+            )
+        )
+
+    return components, connections, compiled

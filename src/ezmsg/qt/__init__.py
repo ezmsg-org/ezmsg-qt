@@ -11,15 +11,17 @@ Example:
         def __init__(self):
             super().__init__()
             # Simple subscription (no processing)
-            self.data_sub = EzSubscriber(MyTopic.OUTPUT, parent=self)
+            self.bridge = bridge
+            self.data_sub = EzSubscriber(MyTopic.OUTPUT, parent=self, bridge=bridge)
             self.data_sub.connect(self.on_data)
 
-            # Processing chain with parallel (sidecar) and local (bridge) stages
+            # Processing pipeline with isolated and shared sidecar stages
             self.chain = (
                 ProcessorChain(MyTopic.RAW, parent=self)
-                .parallel(LowPassFilter, ScaleProcessor)  # run in sidecar
-                .local(ThresholdDetector)  # run in bridge thread
+                .parallel(LowPassFilter, ScaleProcessor)
+                .local(ThresholdDetector)
                 .connect(self.on_processed)
+                .attach(bridge)
             )
 
         def on_data(self, msg):
@@ -29,10 +31,11 @@ Example:
             pass
 
     app = QtWidgets.QApplication([])
-    window = MyWidget()
+    bridge = EzGuiBridge(app)
+    window = MyWidget(bridge)
     window.show()
 
-    with EzGuiBridge(app):
+    with bridge:
         app.exec()
 """
 

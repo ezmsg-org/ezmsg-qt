@@ -6,6 +6,7 @@ from typing import AsyncGenerator
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
+from ezmsg.qt.bridge import EzGuiBridge
 from ezmsg.qt.chain import ProcessorChain
 
 
@@ -26,6 +27,7 @@ class PassthroughProcessor(ez.Unit):
 def test_bridge_sets_up_visibility_filter(qtbot):
     """Bridge installs visibility filter for auto_gate chains."""
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    bridge = EzGuiBridge(app)
 
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
@@ -34,9 +36,11 @@ def test_bridge_sets_up_visibility_filter(qtbot):
     chain = (
         ProcessorChain(DemoTopic.DATA, parent=widget, auto_gate=True)
         .parallel(PassthroughProcessor)
+        .connect(lambda x: None)
+        .attach(bridge)
     )
-    chain.connect(lambda x: None)
 
     # Chain should have parent widget set
     assert chain.parent_widget is widget
     assert chain.auto_gate is True
+    assert chain.bridge is bridge

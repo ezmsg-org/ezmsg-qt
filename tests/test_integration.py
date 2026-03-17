@@ -36,9 +36,10 @@ class AddOneProcessor(ez.Unit):
 def test_full_chain_integration(qtbot):
     """Full integration test with sidecar processing."""
     from qtpy import QtWidgets
-    from ezmsg.qt import EzGuiBridge, EzSubscriber, EzPublisher
+    from ezmsg.qt import EzGuiBridge, EzPublisher, ProcessorChain
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    bridge = EzGuiBridge(app)
 
     results = []
 
@@ -46,17 +47,16 @@ def test_full_chain_integration(qtbot):
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
-    sub = EzSubscriber(DemoTopic.INPUT, parent=widget)
-    pub = EzPublisher(DemoTopic.INPUT, parent=widget)
+    pub = EzPublisher(DemoTopic.INPUT, parent=widget, bridge=bridge)
 
-    # Chain: double (in sidecar) -> add one (in bridge)
-    chain = sub.process(DoubleProcessor, in_process=True)
-    chain.process(AddOneProcessor, in_process=False)
-    chain.connect(results.append)
+    # Chain: double (isolated sidecar process) -> add one (shared sidecar process)
+    ProcessorChain(DemoTopic.INPUT, parent=widget).parallel(DoubleProcessor).local(
+        AddOneProcessor
+    ).connect(results.append).attach(bridge)
 
     widget.show()
 
-    with EzGuiBridge(app):
+    with bridge:
         # Publish test values
         pub.emit(5.0)  # Expected: (5 * 2) + 1 = 11
         pub.emit(10.0)  # Expected: (10 * 2) + 1 = 21

@@ -1,4 +1,4 @@
-"""ProcessorChain - Fluent API for chaining processors on subscriptions."""
+"""ProcessorChain - Fluent API for compiled processing pipelines."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import field
 from enum import Enum
 from typing import Any
 from typing import TYPE_CHECKING
+from typing import Literal
 from typing import Union
 
 from qtpy import QtWidgets
@@ -15,7 +16,7 @@ from qtpy import QtWidgets
 import ezmsg.core as ez
 
 if TYPE_CHECKING:
-    pass
+    from .bridge import EzGuiBridge
 
 # Type alias for processor specifications
 # A processor can be specified as:
@@ -71,7 +72,7 @@ class ProcessorGroup:
     """A group of processors that run together in the same execution context."""
 
     processors: list[ProcessorSpec] = field(default_factory=list)
-    parallel: bool = False  # True = sidecar process, False = bridge thread
+    mode: Literal["shared", "process"] = "shared"
 
 
 class ProcessorChain:
@@ -79,15 +80,19 @@ class ProcessorChain:
     Fluent builder for processor chains.
 
     ProcessorChain accumulates processor groups that will be executed
-    in sequence. Groups can run in parallel (sidecar process) or locally
-    (bridge thread).
+    in sequence inside a sidecar ezmsg runtime owned by :class:`EzGuiBridge`.
+
+    - ``parallel()`` runs a group in its own sidecar process.
+    - ``local()`` runs a group in the shared sidecar process.
+
+    Neither mode runs work on the Qt UI thread.
 
     Example:
         # Using Unit classes
         chain = (
             ProcessorChain(Topic.RAW, parent=widget)
-            .parallel(LowPassFilter, ScaleProcessor)  # grouped in sidecar
-            .local(ThresholdDetector)  # bridge thread
+            .parallel(LowPassFilter, ScaleProcessor)
+            .local(ThresholdDetector)
             .connect(widget.on_data)
         )
 
@@ -119,17 +124,14 @@ class ProcessorChain:
             parent: Optional parent widget for auto-gating.
             auto_gate: If True, gate based on parent widget visibility.
         """
-        from .bridge import _register_chain
-
         self._source_topic = source_topic
         self._parent_widget = parent
         self._auto_gate = auto_gate
         self._groups: list[ProcessorGroup] = []
         self._handler: Callable[[Any], None] | None = None
-        self._chain_id: str | None = None  # Set by bridge during registration
-
-        # Register with the bridge
-        _register_chain(self)
+        self._chain_id: str | None = None
+        self._bridge: EzGuiBridge | None = None
+        self._attached = False
 
     @property
     def source_topic(self) -> Enum:
@@ -157,7 +159,7 @@ class ProcessorChain:
         return self._handler
 
     def parallel(self, *processors: ProcessorSpec) -> ProcessorChain:
-        """Add processors to run in a sidecar process.
+        """Add processors to run in an isolated sidecar process.
 
         Multiple processors passed to a single parallel() call will be
         grouped together in the same process.
@@ -173,11 +175,11 @@ class ProcessorChain:
             chain.parallel(LowPassFilter, ScaleProcessor)  # same process
             chain.parallel(FFT)  # different process
         """
-        self._groups.append(ProcessorGroup(processors=list(processors), parallel=True))
+        self._groups.append(ProcessorGroup(processors=list(processors), mode="process"))
         return self
 
     def local(self, *processors: ProcessorSpec) -> ProcessorChain:
-        """Add processors to run in the bridge thread.
+        """Add processors to run in the shared sidecar process.
 
         Multiple processors passed to a single local() call will be
         grouped together.
@@ -190,12 +192,12 @@ class ProcessorChain:
             Self for method chaining.
 
         Example:
-            chain.local(ThresholdDetector)  # runs in bridge thread
+            chain.local(ThresholdDetector)  # runs in shared sidecar process
         """
-        self._groups.append(ProcessorGroup(processors=list(processors), parallel=False))
+        self._groups.append(ProcessorGroup(processors=list(processors), mode="shared"))
         return self
 
-    def connect(self, slot: Callable[[Any], None]) -> None:
+    def connect(self, slot: Callable[[Any], None]) -> ProcessorChain:
         """Connect the chain output to a Qt handler.
 
         This finalizes the chain configuration. The handler will be
@@ -205,3 +207,36 @@ class ProcessorChain:
             slot: A callable that receives processed messages.
         """
         self._handler = slot
+        return self
+
+    @property
+    def bridge(self) -> EzGuiBridge | None:
+        """The bridge this pipeline is attached to, if any."""
+        return self._bridge
+
+    @property
+    def attached(self) -> bool:
+        """Whether this pipeline has been attached to a bridge."""
+        return self._attached
+
+    def attach(self, bridge: EzGuiBridge) -> ProcessorChain:
+        """Attach this pipeline to a bridge.
+
+        The pipeline must be fully configured before attachment.
+        """
+        bridge.attach(self)
+        return self
+
+    def _bind_bridge(self, bridge: EzGuiBridge) -> None:
+        if self._bridge is not None and self._bridge is not bridge:
+            raise RuntimeError(
+                "ProcessorChain is already attached to a different bridge"
+            )
+        self._bridge = bridge
+        self._attached = True
+
+    def _validate(self) -> None:
+        if not self._groups:
+            raise ValueError("ProcessorChain must define at least one processor group")
+        if self._handler is None:
+            raise ValueError("ProcessorChain must connect a handler before attachment")

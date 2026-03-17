@@ -1,19 +1,27 @@
-"""EzGuiBridge - Manages async infrastructure for Qt/ezmsg integration."""
+"""EzGuiBridge - explicit runtime ownership for Qt/ezmsg integration."""
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import signal
 import socket
 import threading
 from typing import TYPE_CHECKING
+from typing import Any
+import weakref
 
 from ezmsg.core.backend import GraphRunner
 from ezmsg.core.graphcontext import GraphContext
 from ezmsg.core.netprotocol import AddressType
 from qtpy import QtCore
 from qtpy import QtWidgets
+
+from .gate import GateMessage
+from .sidecar import CompiledPipeline
+from .sidecar import build_sidecar_components
+from .sidecar import normalize_topic
 
 if TYPE_CHECKING:
     from .chain import ProcessorChain
@@ -22,406 +30,468 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Global state for self-registration
-_active_bridge: EzGuiBridge | None = None
-_pending_endpoints: list[EzSubscriber | EzPublisher] = []
-_pending_chains: list[ProcessorChain] = []
+
+@dataclass
+class _SubscriberRuntime:
+    client: Any
+    task: asyncio.Task[None]
 
 
-def _register_chain(chain: ProcessorChain) -> None:
-    """Register a processor chain with the active bridge or queue for later."""
-    if _active_bridge is not None:
-        _active_bridge._register_chain(chain)
-    else:
-        _pending_chains.append(chain)
+@dataclass
+class _PublisherRuntime:
+    client: Any
+    task: asyncio.Task[None]
 
 
-def _register_endpoint(endpoint: EzSubscriber | EzPublisher) -> None:
-    """Register an endpoint with the active bridge or queue for later."""
-    if _active_bridge is not None:
-        _active_bridge._register(endpoint)
-    else:
-        _pending_endpoints.append(endpoint)
+@dataclass
+class _PipelineRuntime:
+    compiled: CompiledPipeline
+    client: Any
+    task: asyncio.Task[None]
+    gate_publisher: Any | None = None
 
 
 class _QtSignalDispatcher(QtCore.QObject):
-    """Helper class to dispatch calls from background threads to Qt main thread."""
+    """Dispatch work onto the Qt main thread."""
 
-    call_signal = QtCore.Signal(object, object)  # (callable, args)
+    call_signal = QtCore.Signal(object, object)  # pyright: ignore[reportPrivateImportUsage]
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QtCore.QObject | None = None):
         super().__init__(parent)
-        self.call_signal.connect(
-            self._on_call, QtCore.Qt.ConnectionType.QueuedConnection
-        )
+        self.call_signal.connect(self._on_call)
 
-    def _on_call(self, func, args):
-        """Called on Qt main thread."""
+    def _on_call(self, func, args) -> None:
         func(*args)
 
-    def schedule(self, func, *args):
-        """Schedule a function call on the Qt main thread."""
+    def schedule(self, func, *args) -> None:
         self.call_signal.emit(func, args)
 
 
 class EzGuiBridge:
-    """
-    Bridge Qt widgets to ezmsg channels.
-
-    EzGuiBridge manages the asyncio infrastructure needed to connect Qt widgets
-    to ezmsg's pub/sub system. It runs a background thread with an asyncio
-    event loop, handling all async operations while presenting a sync API
-    to Qt code.
-
-    Usage:
-        app = QtWidgets.QApplication([])
-        window = MyWidget()  # Creates EzSubscriber/EzPublisher instances
-        window.show()
-
-        with EzGuiBridge(app):
-            app.exec()
-    """
+    """Bridge Qt widgets to ezmsg channels with explicit ownership."""
 
     def __init__(
         self,
         app: QtWidgets.QApplication,
         graph_address: AddressType | None = None,
     ):
-        """
-        Create a bridge for Qt/ezmsg integration.
-
-        Args:
-            app: The Qt application instance.
-            graph_address: Optional address of the GraphServer.
-        """
         self.app = app
-        self._context_entered = False
         self._context = GraphContext(graph_address)
+        self._context_entered = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._subscribers: list[EzSubscriber] = []
-        self._publishers: list[EzPublisher] = []
-        self._tasks: set[asyncio.Task[None]] = set()
         self._shutdown = threading.Event()
         self._setup_complete = threading.Event()
+        self._setup_error: BaseException | None = None
         self._running = False
+        self._dispatcher = _QtSignalDispatcher(app)
+        self._tasks: set[asyncio.Task[None]] = set()
+
+        self._subscribers: dict[int, EzSubscriber] = {}
+        self._publishers: dict[int, EzPublisher] = {}
+        self._pipelines: dict[int, ProcessorChain] = {}
+
+        self._subscriber_runtime: dict[int, _SubscriberRuntime] = {}
+        self._publisher_runtime: dict[int, _PublisherRuntime] = {}
+        self._pipeline_runtime: dict[int, _PipelineRuntime] = {}
+
+        self._compiled_pipelines: list[CompiledPipeline] = []
+        self._sidecar: GraphRunner | None = None
+        self._chain_counter = 0
+
         self._prev_sigint_handler = None
         self._sigint_notifier: QtCore.QSocketNotifier | None = None
         self._wakeup_sock_r: socket.socket | None = None
         self._wakeup_sock_w: socket.socket | None = None
         self._wakeup_prev_fd: int | None = None
-        self._chains: list[ProcessorChain] = []
-        self._chain_counter: int = 0
-        self._sidecar: GraphRunner | None = None
-        self._dispatcher = _QtSignalDispatcher(app)
-        self._gate_publishers: dict[str, object] = {}  # chain_id -> publisher
+
+    def attach(self, attachable):
+        """Attach a subscriber, publisher, or processor pipeline to this bridge."""
+        from .chain import ProcessorChain
+        from .publisher import EzPublisher
+        from .subscriber import EzSubscriber
+
+        if isinstance(attachable, EzSubscriber):
+            self._attach_subscriber(attachable)
+        elif isinstance(attachable, EzPublisher):
+            self._attach_publisher(attachable)
+        elif isinstance(attachable, ProcessorChain):
+            self._attach_pipeline(attachable)
+        else:
+            raise TypeError(f"Unsupported attachable type: {type(attachable)!r}")
+
+        return attachable
+
+    def detach(self, attachable) -> None:
+        """Detach a subscriber or publisher from this bridge."""
+        from .publisher import EzPublisher
+        from .subscriber import EzSubscriber
+
+        if isinstance(attachable, EzSubscriber):
+            self._detach_subscriber(id(attachable))
+            return
+        if isinstance(attachable, EzPublisher):
+            self._detach_publisher(id(attachable))
+            return
+
+        raise TypeError("Only EzSubscriber and EzPublisher can be detached at runtime")
+
+    def _attach_subscriber(self, subscriber: EzSubscriber) -> None:
+        key = id(subscriber)
+        if key in self._subscribers:
+            return
+
+        subscriber._bind_bridge(self)
+        self._subscribers[key] = subscriber
+        self._bind_destroyed(subscriber, self._detach_subscriber, key)
+
+        if self._running and self._loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._setup_subscriber(subscriber), self._loop
+            ).result()
+
+    def _attach_publisher(self, publisher: EzPublisher) -> None:
+        key = id(publisher)
+        if key in self._publishers:
+            return
+
+        publisher._bind_bridge(self)
+        self._publishers[key] = publisher
+        self._bind_destroyed(publisher, self._detach_publisher, key)
+
+        if self._running and self._loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._setup_publisher(publisher), self._loop
+            ).result()
+
+    def _attach_pipeline(self, chain: ProcessorChain) -> None:
+        key = id(chain)
+        if key in self._pipelines:
+            return
+        if self._running:
+            raise RuntimeError(
+                "Processor pipelines must be attached before bridge start"
+            )
+
+        chain._validate()
+        chain._bind_bridge(self)
+        if chain._chain_id is None:
+            chain._chain_id = f"chain_{self._chain_counter}"
+            self._chain_counter += 1
+        self._pipelines[key] = chain
+
+    def _bind_destroyed(self, obj: QtCore.QObject, callback, key: int) -> None:
+        obj.destroyed.connect(lambda *_args, _key=key: callback(_key))
+
+    def _detach_subscriber(self, key: int) -> None:
+        subscriber = self._subscribers.pop(key, None)
+        if subscriber is None:
+            return
+        runtime = self._subscriber_runtime.pop(key, None)
+        if runtime is None or self._loop is None or self._loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._close_subscriber_runtime(runtime), self._loop
+            ).result()
+        except RuntimeError:
+            logger.debug("Subscriber detached after loop shutdown")
+
+    def _detach_publisher(self, key: int) -> None:
+        publisher = self._publishers.pop(key, None)
+        if publisher is None:
+            return
+        runtime = self._publisher_runtime.pop(key, None)
+        if runtime is None or self._loop is None or self._loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._close_publisher_runtime(runtime), self._loop
+            ).result()
+        except RuntimeError:
+            logger.debug("Publisher detached after loop shutdown")
 
     def __enter__(self) -> EzGuiBridge:
-        """Start async infrastructure and connect channels."""
-        global _active_bridge
-        _active_bridge = self
         self._running = True
+        self._setup_error = None
+        self._shutdown.clear()
         self._install_sigint_handler()
 
-        # Process any pending endpoints created before bridge started
-        for endpoint in _pending_endpoints:
-            self._register(endpoint)
-        _pending_endpoints.clear()
-
-        # Process any pending chains created before bridge started
-        for chain in _pending_chains:
-            self._register_chain(chain)
-        _pending_chains.clear()
-
-        # Start background asyncio thread
         self._thread = threading.Thread(
             target=self._run_async_loop, daemon=True, name="EzGuiBridge"
         )
         self._thread.start()
 
-        # Wait for async setup to complete
         if not self._setup_complete.wait(timeout=30.0):
             raise RuntimeError("EzGuiBridge setup timed out")
+        if self._setup_error is not None:
+            if self._thread is not None:
+                self._thread.join(timeout=5.0)
+            raise RuntimeError("EzGuiBridge setup failed") from self._setup_error
 
         return self
 
     def __exit__(self, exc_type, exc, exc_tb) -> bool | None:
-        """Cleanup channels and stop async thread."""
-        global _active_bridge
-        print("[Bridge] __exit__ starting...", flush=True)
         self._running = False
         if exc_type is KeyboardInterrupt:
             app = QtWidgets.QApplication.instance()
             if app is not None:
                 app.quit()
 
-        # Stop sidecar FIRST, from main thread (not async context)
-        # This avoids deadlock where sidecar.stop() blocks the event loop,
-        # but sidecar processes need the event loop to process GraphServer notifications
         if self._sidecar is not None:
-            print("[Bridge] Stopping sidecar...", flush=True)
-            self._sidecar.stop()
-            self._sidecar = None
-            print("[Bridge] Sidecar stopped", flush=True)
+            try:
+                self._sidecar.stop()
+            finally:
+                self._sidecar = None
 
-        # Signal asyncio loop to stop
-        print("[Bridge] Setting shutdown event...", flush=True)
         self._shutdown.set()
 
-        # Wait for background thread
         if self._thread is not None:
-            print("[Bridge] Joining background thread...", flush=True)
             self._thread.join(timeout=10.0)
-            if self._thread.is_alive():
-                print(
-                    "[Bridge] WARNING: Thread still alive after join timeout!",
-                    flush=True,
-                )
-            else:
-                print("[Bridge] Thread joined successfully", flush=True)
+            self._thread = None
 
-        _active_bridge = None
         self._restore_sigint_handler()
-        print("[Bridge] __exit__ complete", flush=True)
         if exc_type is KeyboardInterrupt:
             return False
+        return None
 
-    def _register(self, endpoint: EzSubscriber | EzPublisher) -> None:
-        """Register an endpoint for connection."""
-        from .publisher import EzPublisher
-        from .subscriber import EzSubscriber
+    def _run_async_loop(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._async_main())
+        except Exception:
+            logger.exception("Error in EzGuiBridge async loop")
+        finally:
+            self._loop.close()
+            self._loop = None
 
-        if isinstance(endpoint, EzSubscriber):
-            self._subscribers.append(endpoint)
-            # If already running, connect immediately
-            if self._running and self._loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._setup_subscriber(endpoint), self._loop
-                )
-        elif isinstance(endpoint, EzPublisher):
-            self._publishers.append(endpoint)
-            # If already running, connect immediately
-            if self._running and self._loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._setup_publisher(endpoint), self._loop
-                )
+    async def _async_main(self) -> None:
+        try:
+            try:
+                await self._context.__aenter__()
+                self._context_entered = True
+                await self._async_setup()
+            except BaseException as exc:
+                self._setup_error = exc
+            finally:
+                self._setup_complete.set()
 
-    def _register_chain(self, chain: ProcessorChain) -> None:
-        """Register a processor chain for setup."""
-        chain._chain_id = f"chain_{self._chain_counter}"
-        self._chain_counter += 1
-        self._chains.append(chain)
+            if self._setup_error is None:
+                while not self._shutdown.is_set():
+                    await asyncio.sleep(0.1)
+        finally:
+            await self._async_cleanup()
 
-        # If already running, set up immediately
-        if self._running and self._loop is not None:
-            asyncio.run_coroutine_threadsafe(self._setup_chain(chain), self._loop)
+        if self._setup_error is not None:
+            raise self._setup_error
 
-    async def _setup_chains(self) -> None:
-        """Set up all processor chains including sidecar."""
-        from .sidecar import build_sidecar_components
+    async def _async_setup(self) -> None:
+        await self._setup_sidecar()
 
-        if not self._chains:
+        for subscriber in list(self._subscribers.values()):
+            await self._setup_subscriber(subscriber)
+
+        for publisher in list(self._publishers.values()):
+            await self._setup_publisher(publisher)
+
+        for compiled in self._compiled_pipelines:
+            await self._setup_pipeline_runtime(compiled)
+
+    async def _setup_sidecar(self) -> None:
+        pipelines = list(self._pipelines.values())
+        if not pipelines:
+            self._compiled_pipelines = []
             return
 
-        # Assign chain IDs if not already set
-        for chain in self._chains:
-            if chain._chain_id is None:
-                chain._chain_id = f"chain_{self._chain_counter}"
-                self._chain_counter += 1
+        components, connections, compiled = build_sidecar_components(pipelines)
+        runner = GraphRunner(
+            components=components,
+            connections=connections,
+            graph_address=self._context.graph_address,
+        )
+        await asyncio.to_thread(runner.start)
+        await self._context.sync(timeout=5.0)
+        self._sidecar = runner
+        self._compiled_pipelines = compiled
 
-        # Build sidecar components for in_process stages
-        components, connections = build_sidecar_components(self._chains)
-
-        if components:
-            # Start sidecar GraphRunner
-            self._sidecar = GraphRunner(
-                components=components,
-                connections=connections,
-                graph_address=self._context.graph_address,
-            )
-            self._sidecar.start()
-            logger.info(f"Started sidecar with {len(components)} components")
-
-            # Wait a bit for sidecar to fully initialize its publishers
-            await asyncio.sleep(0.5)
-
-        # Set up each chain (bridge-thread stages + output subscription)
-        for chain in self._chains:
-            await self._setup_chain(chain)
-
-    async def _setup_chain(self, chain: ProcessorChain) -> None:
-        """Set up a processor chain."""
-        from .chain import _to_unit
-
-        if not chain.groups or chain.handler is None:
+    async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
+        key = id(ez_sub)
+        if key in self._subscriber_runtime:
             return
 
-        has_parallel = any(g.parallel for g in chain.groups)
-        local_groups = [g for g in chain.groups if not g.parallel]
+        topic = normalize_topic(ez_sub.topic)
+        sub_kwargs: dict[str, object] = {}
+        if ez_sub.leaky:
+            sub_kwargs["leaky"] = True
+            if ez_sub.max_queue is not None:
+                sub_kwargs["max_queue"] = ez_sub.max_queue
 
-        if has_parallel:
-            # Subscribe to sidecar output topic
-            output_topic = f"_qt.{chain._chain_id}.out"
+        client = await self._context.subscriber(topic, **sub_kwargs)
+        ez_sub._sub = client
+        task = asyncio.create_task(
+            self._subscriber_loop(ez_sub, client),
+            name=f"sub-{topic}",
+        )
+        self._track_task(task)
+        self._subscriber_runtime[key] = _SubscriberRuntime(client=client, task=task)
 
-            if local_groups:
-                # Need to run local processors after sidecar output
-                processors = []
-                for group in local_groups:
-                    for spec in group.processors:
-                        unit = _to_unit(spec)
-                        await unit.initialize()
-                        processors.append(unit)
+    async def _setup_publisher(self, ez_pub: EzPublisher) -> None:
+        key = id(ez_pub)
+        if key in self._publisher_runtime:
+            return
 
-                sub = await self._context.subscriber(output_topic)
-                task = asyncio.create_task(
-                    self._chain_processor_loop(chain, sub, processors),
-                    name=f"chain-{chain._chain_id}-bridge",
-                )
-            else:
-                # No local processors - just subscribe to sidecar output
-                sub = await self._context.subscriber(output_topic)
-                task = asyncio.create_task(
-                    self._chain_output_loop(chain, sub),
-                    name=f"chain-{chain._chain_id}-output",
-                )
+        topic = normalize_topic(ez_pub.topic)
+        client = await self._context.publisher(topic)
+        ez_pub._pub = client
+        if self._loop is None:
+            raise RuntimeError("Bridge loop is not initialized")
+        ez_pub._bind_runtime(self._loop)
+        task = asyncio.create_task(
+            self._publisher_loop(ez_pub, client),
+            name=f"pub-{topic}",
+        )
+        self._track_task(task)
+        self._publisher_runtime[key] = _PublisherRuntime(client=client, task=task)
 
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+    async def _setup_pipeline_runtime(self, compiled: CompiledPipeline) -> None:
+        key = id(compiled.chain)
+        client = await self._context.subscriber(compiled.output_topic)
+        task = asyncio.create_task(
+            self._pipeline_output_loop(compiled, client),
+            name=f"pipeline-{compiled.chain._chain_id}",
+        )
+        self._track_task(task)
 
-        elif local_groups:
-            # All processors in bridge thread (no parallel groups)
-            processors = []
-            for group in local_groups:
-                for spec in group.processors:
-                    unit = _to_unit(spec)
-                    await unit.initialize()
-                    processors.append(unit)
-
-            source_topic = str(chain.source_topic)
-            sub = await self._context.subscriber(source_topic)
-
-            task = asyncio.create_task(
-                self._chain_processor_loop(chain, sub, processors),
-                name=f"chain-{chain._chain_id}",
+        gate_publisher = None
+        chain = compiled.chain
+        if chain.auto_gate and chain.parent_widget is not None:
+            gate_publisher = await self._context.publisher(compiled.gate_topic)
+            await gate_publisher.broadcast(
+                GateMessage(open=chain.parent_widget.isVisible())
             )
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            self._dispatcher.schedule(self._setup_auto_gate, chain)
 
-        # Set up auto-gating if enabled
-        # NOTE: We defer visibility filter setup to after _setup_complete is set,
-        # since the main thread is blocked waiting for setup to complete.
-        if chain.auto_gate and chain.parent_widget is not None and has_parallel:
-            # Pre-create the gate publisher so we can send messages quickly
-            gate_topic = f"_qt.{chain._chain_id}.gate"
-            gate_pub = await self._context.publisher(gate_topic)
-            self._gate_publishers[chain._chain_id] = gate_pub
-
-            # Store chain for deferred visibility filter setup
-            if not hasattr(self, "_deferred_auto_gates"):
-                self._deferred_auto_gates = []
-            self._deferred_auto_gates.append(chain)
+        self._pipeline_runtime[key] = _PipelineRuntime(
+            compiled=compiled,
+            client=client,
+            task=task,
+            gate_publisher=gate_publisher,
+        )
 
     def _setup_auto_gate(self, chain: ProcessorChain) -> None:
-        """Install visibility filter for auto-gating.
-
-        Must be called on Qt main thread.
-        """
         from .visibility import VisibilityFilter
 
         widget = chain.parent_widget
         if widget is None:
             return
 
+        chain_ref = weakref.ref(chain)
+
         def on_visibility(visible: bool) -> None:
-            if self._loop is None or not self._running:
+            current_chain = chain_ref()
+            if current_chain is None or self._loop is None or not self._running:
                 return
             asyncio.run_coroutine_threadsafe(
-                self._send_gate_message(chain, visible), self._loop
+                self._send_gate_message(current_chain, visible), self._loop
             )
 
-        vf = VisibilityFilter(on_visibility, parent=widget)
-        widget.installEventFilter(vf)
+        event_filter = VisibilityFilter(on_visibility, parent=widget)
+        widget.installEventFilter(event_filter)
+        setattr(chain, "_visibility_filter", event_filter)
 
     async def _send_gate_message(self, chain: ProcessorChain, open: bool) -> None:
-        """Send gate control message for a chain."""
-        from .gate import GateMessage
-
-        pub = self._gate_publishers.get(chain._chain_id)
-        if pub is None:
-            logger.warning(f"No gate publisher for chain {chain._chain_id}")
+        runtime = self._pipeline_runtime.get(id(chain))
+        if runtime is None or runtime.gate_publisher is None:
             return
+        await runtime.gate_publisher.broadcast(GateMessage(open=open))
 
-        await pub.broadcast(GateMessage(open=open))
-        logger.debug(f"Sent gate message for {chain._chain_id}: open={open}")
-        print(f"Sent gate message for {chain._chain_id}: open={open}")
+    async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
+        rate = None
+        if ez_sub.throttle_hz is not None:
+            from ezmsg.util.rate import Rate
 
-    async def _chain_processor_loop(
-        self,
-        chain: ProcessorChain,
-        sub,
-        processors: list,
-    ) -> None:
-        """Run messages through bridge-thread processor chain."""
-        logger.debug(f"Chain processor loop started for {chain._chain_id}")
+            rate = Rate(float(ez_sub.throttle_hz))
+
         try:
             while self._running:
                 msg = await sub.recv()
-
-                # Run through each processor
-                result = msg
-                for processor in processors:
-                    async for _output_stream, output_msg in self._run_processor(
-                        processor, result
-                    ):
-                        result = output_msg
-                        break  # Take first output
-
-                # Deliver to Qt handler
-                if chain.handler is not None:
-                    self._dispatcher.schedule(chain.handler, result)
-
+                self._dispatcher.schedule(ez_sub._on_message, msg)
+                if rate is not None:
+                    await rate.sleep()
         except asyncio.CancelledError:
-            logger.debug(f"Chain loop cancelled for {chain._chain_id}")
+            logger.debug("Subscriber loop cancelled for %s", ez_sub.topic)
         except Exception:
-            logger.exception(f"Error in chain loop for {chain._chain_id}")
+            logger.exception("Error in subscriber loop for %s", ez_sub.topic)
 
-    async def _chain_output_loop(self, chain: ProcessorChain, sub) -> None:
-        """Receive sidecar output and deliver to Qt handler."""
-        logger.debug(f"Chain output loop started for {chain._chain_id}")
+    async def _publisher_loop(self, ez_pub: EzPublisher, pub) -> None:
+        try:
+            while self._running:
+                msg = await ez_pub._get_message()
+                await pub.broadcast(msg)
+        except asyncio.CancelledError:
+            logger.debug("Publisher loop cancelled for %s", ez_pub.topic)
+        except Exception:
+            logger.exception("Error in publisher loop for %s", ez_pub.topic)
+
+    async def _pipeline_output_loop(self, compiled: CompiledPipeline, sub) -> None:
         try:
             while self._running:
                 msg = await sub.recv()
-
-                if chain.handler is not None:
-                    # Use signal dispatcher to schedule on Qt main thread
-                    self._dispatcher.schedule(chain.handler, msg)
+                if compiled.chain.handler is not None:
+                    self._dispatcher.schedule(compiled.chain.handler, msg)
         except asyncio.CancelledError:
-            logger.debug(f"Chain output loop cancelled for {chain._chain_id}")
+            logger.debug("Pipeline loop cancelled for %s", compiled.chain._chain_id)
         except Exception:
-            logger.exception(f"Error in chain output loop for {chain._chain_id}")
+            logger.exception("Error in pipeline loop for %s", compiled.chain._chain_id)
 
-    async def _run_processor(self, processor, msg):
-        """Run a single processor on a message."""
-        # ezmsg stores decorated methods in the unit's tasks attribute
-        tasks = getattr(processor, "tasks", {}) or getattr(processor, "_tasks", {})
-        if tasks:
-            # Get the first task method (typically 'process' or similar)
-            for name, _func in tasks.items():
-                method = getattr(processor, name)
-                async for item in method(msg):
-                    yield item
-                return
-        # Fallback: look for any method that could be a processor
-        for name in ["process", "run", "execute"]:
-            if hasattr(processor, name):
-                method = getattr(processor, name)
-                if callable(method):
-                    async for item in method(msg):
-                        yield item
-                    return
-        logger.warning(
-            f"_run_processor: No task method found in {processor.__class__.__name__}"
-        )
+    def _track_task(self, task: asyncio.Task[None]) -> None:
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _close_subscriber_runtime(self, runtime: _SubscriberRuntime) -> None:
+        runtime.task.cancel()
+        await asyncio.gather(runtime.task, return_exceptions=True)
+        runtime.client.close()
+        await runtime.client.wait_closed()
+
+    async def _close_publisher_runtime(self, runtime: _PublisherRuntime) -> None:
+        runtime.task.cancel()
+        await asyncio.gather(runtime.task, return_exceptions=True)
+        runtime.client.close()
+        await runtime.client.wait_closed()
+
+    async def _close_pipeline_runtime(self, runtime: _PipelineRuntime) -> None:
+        runtime.task.cancel()
+        await asyncio.gather(runtime.task, return_exceptions=True)
+        runtime.client.close()
+        await runtime.client.wait_closed()
+        if runtime.gate_publisher is not None:
+            runtime.gate_publisher.close()
+            await runtime.gate_publisher.wait_closed()
+
+    async def _async_cleanup(self) -> None:
+        for runtime in list(self._subscriber_runtime.values()):
+            await self._close_subscriber_runtime(runtime)
+        self._subscriber_runtime.clear()
+
+        for runtime in list(self._publisher_runtime.values()):
+            await self._close_publisher_runtime(runtime)
+        self._publisher_runtime.clear()
+
+        for runtime in list(self._pipeline_runtime.values()):
+            await self._close_pipeline_runtime(runtime)
+        self._pipeline_runtime.clear()
+
+        if self._tasks:
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks.clear()
+
+        if self._context_entered:
+            await self._context.__aexit__(None, None, None)
+            self._context_entered = False
 
     def _install_sigint_handler(self) -> None:
         try:
@@ -429,7 +499,7 @@ class EzGuiBridge:
             signal.signal(signal.SIGINT, self._handle_sigint)
             self._install_signal_wakeup()
         except (ValueError, RuntimeError) as exc:
-            logger.debug(f"Unable to install SIGINT handler: {exc}")
+            logger.debug("Unable to install SIGINT handler: %s", exc)
 
     def _restore_sigint_handler(self) -> None:
         self._restore_signal_wakeup()
@@ -438,11 +508,11 @@ class EzGuiBridge:
         try:
             signal.signal(signal.SIGINT, self._prev_sigint_handler)
         except (ValueError, RuntimeError) as exc:
-            logger.debug(f"Unable to restore SIGINT handler: {exc}")
+            logger.debug("Unable to restore SIGINT handler: %s", exc)
         finally:
             self._prev_sigint_handler = None
 
-    def _handle_sigint(self, sig, frame) -> None:
+    def _handle_sigint(self, _sig, _frame) -> None:
         app = QtWidgets.QApplication.instance()
         if app is not None:
             app.quit()
@@ -464,7 +534,7 @@ class EzGuiBridge:
             )
             self._sigint_notifier.activated.connect(self._on_signal_wakeup)
         except (OSError, RuntimeError, ValueError) as exc:
-            logger.debug(f"Unable to install signal wakeup fd: {exc}")
+            logger.debug("Unable to install signal wakeup fd: %s", exc)
             self._restore_signal_wakeup()
 
     def _restore_signal_wakeup(self) -> None:
@@ -476,7 +546,7 @@ class EzGuiBridge:
             try:
                 signal.set_wakeup_fd(self._wakeup_prev_fd)
             except (OSError, RuntimeError, ValueError) as exc:
-                logger.debug(f"Unable to restore wakeup fd: {exc}")
+                logger.debug("Unable to restore wakeup fd: %s", exc)
             finally:
                 self._wakeup_prev_fd = None
         if self._wakeup_sock_r is not None:
@@ -501,192 +571,3 @@ class EzGuiBridge:
             pass
         if got_sigint:
             self._handle_sigint(signal.SIGINT, None)
-
-    def _run_async_loop(self) -> None:
-        """Background thread entry point."""
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-
-        try:
-            self._loop.run_until_complete(self._async_main())
-        except Exception:
-            logger.exception("Error in EzGuiBridge async loop")
-        finally:
-            self._loop.close()
-
-    async def _async_main(self) -> None:
-        """Main async entry point."""
-        try:
-            await self._context.__aenter__()
-            self._context_entered = True
-
-            # Setup all subscribers and publishers
-            await self._async_setup()
-
-            # Signal that setup is complete
-            self._setup_complete.set()
-
-            # Now set up deferred auto-gates (Qt main thread is no longer blocked)
-            if hasattr(self, "_deferred_auto_gates"):
-                for chain in self._deferred_auto_gates:
-                    # Use signal dispatcher to schedule on Qt main thread
-                    self._dispatcher.schedule(self._setup_auto_gate, chain)
-                del self._deferred_auto_gates
-
-            # Run until shutdown requested
-            while not self._shutdown.is_set():
-                await asyncio.sleep(0.1)
-
-        finally:
-            # Cleanup
-            await self._async_cleanup()
-
-    async def _async_setup(self) -> None:
-        """Create all pub/sub clients and processor chains."""
-        for subscriber in self._subscribers:
-            await self._setup_subscriber(subscriber)
-
-        for publisher in self._publishers:
-            await self._setup_publisher(publisher)
-
-        # Set up processor chains (includes sidecar setup)
-        await self._setup_chains()
-
-    async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
-        """Setup a single subscriber."""
-        topic_str = str(ez_sub.topic)
-        logger.info(f"Creating subscriber for topic: {topic_str}")
-        print(f"[Bridge] Creating subscriber for topic: {topic_str}", flush=True)
-        sub_kwargs: dict[str, object] = {}
-        # Opt-in leaky + queue depth to avoid GUI backpressure on high-rate topics.
-        if getattr(ez_sub, "leaky", False):
-            sub_kwargs["leaky"] = True
-            max_queue = getattr(ez_sub, "max_queue", None)
-            if max_queue is not None:
-                sub_kwargs["max_queue"] = max_queue
-        sub = await self._context.subscriber(topic_str, **sub_kwargs)
-        ez_sub._sub = sub
-
-        # Start receive loop
-        task = asyncio.create_task(
-            self._subscriber_loop(ez_sub, sub), name=f"sub-{topic_str}"
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _setup_publisher(self, ez_pub: EzPublisher) -> None:
-        """Setup a single publisher."""
-        topic_str = str(ez_pub.topic)
-        logger.debug(f"Creating publisher for {topic_str}")
-        pub = await self._context.publisher(topic_str)
-        ez_pub._pub = pub
-
-        # Start publish loop
-        task = asyncio.create_task(
-            self._publisher_loop(ez_pub, pub), name=f"pub-{topic_str}"
-        )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
-        """Receive messages and emit Qt signals."""
-        rate = None
-        throttle_hz = getattr(ez_sub, "throttle_hz", None)
-        if throttle_hz is not None:
-            # Keep reads on time (ROS-style); combined with leaky mode this acts as
-            # a drop/refresh limiter for high-rate topics.
-            from ezmsg.util.rate import Rate
-
-            rate = Rate(float(throttle_hz))
-        logger.debug(f"Subscriber loop started for {ez_sub.topic}")
-        try:
-            while self._running:
-                logger.debug(f"Waiting for message on {ez_sub.topic}...")
-                msg = await sub.recv()
-                logger.debug(f"Received message on {ez_sub.topic}: {msg}")
-
-                # Thread-safe emit to Qt main thread
-                QtCore.QMetaObject.invokeMethod(
-                    ez_sub,
-                    "_on_message",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(object, msg),
-                )
-                if rate is not None:
-                    await rate.sleep()
-        except asyncio.CancelledError:
-            logger.debug(f"Subscriber loop cancelled for {ez_sub.topic}")
-        except GeneratorExit:
-            logger.debug(f"Subscriber loop exiting for {ez_sub.topic}")
-        except RuntimeError as exc:
-            if (
-                not self._running
-                or self._shutdown.is_set()
-                or self._loop is None
-                or self._loop.is_closed()
-                or "Event loop is closed" in str(exc)
-            ):
-                logger.debug(f"Subscriber loop stopping for {ez_sub.topic}: {exc}")
-            else:
-                logger.exception(f"Error in subscriber loop for {ez_sub.topic}")
-        except Exception:
-            logger.exception(f"Error in subscriber loop for {ez_sub.topic}")
-
-    async def _publisher_loop(self, ez_pub: EzPublisher, pub) -> None:
-        """Check queue and broadcast messages."""
-        import queue as queue_module
-
-        logger.debug(f"Publisher loop started for {ez_pub.topic}")
-        try:
-            while self._running:
-                try:
-                    # Non-blocking check with small timeout
-                    msg = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: ez_pub._queue.get(timeout=0.1)
-                    )
-                    logger.debug(f"Broadcasting message on {ez_pub.topic}: {msg}")
-                    await pub.broadcast(msg)
-                except queue_module.Empty:
-                    # Queue.get timeout - continue loop
-                    pass
-        except asyncio.CancelledError:
-            logger.debug(f"Publisher loop cancelled for {ez_pub.topic}")
-        except GeneratorExit:
-            logger.debug(f"Publisher loop exiting for {ez_pub.topic}")
-        except RuntimeError as exc:
-            if (
-                not self._running
-                or self._shutdown.is_set()
-                or self._loop is None
-                or self._loop.is_closed()
-                or "Event loop is closed" in str(exc)
-            ):
-                logger.debug(f"Publisher loop stopping for {ez_pub.topic}: {exc}")
-            else:
-                logger.exception(f"Error in publisher loop for {ez_pub.topic}")
-        except Exception:
-            logger.exception(f"Error in publisher loop for {ez_pub.topic}")
-
-    async def _async_cleanup(self) -> None:
-        """Cleanup all clients and sidecar."""
-        logger.debug("Cleaning up EzGuiBridge")
-        print("[Bridge] _async_cleanup starting...", flush=True)
-
-        # Note: sidecar is stopped in __exit__ (main thread) to avoid deadlock
-        # where sidecar.stop() blocks the event loop that sidecar processes need
-
-        if self._tasks:
-            print(f"[Bridge] Cancelling {len(self._tasks)} tasks...", flush=True)
-            for task in list(self._tasks):
-                task.cancel()
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-            self._tasks.clear()
-            print("[Bridge] Tasks cancelled", flush=True)
-
-        if self._context_entered:
-            print("[Bridge] Exiting graph context...", flush=True)
-            await self._context.__aexit__(None, None, None)
-            self._context_entered = False
-            print("[Bridge] Graph context exited", flush=True)
-
-        print("[Bridge] _async_cleanup complete", flush=True)
