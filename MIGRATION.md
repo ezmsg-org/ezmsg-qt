@@ -32,6 +32,27 @@ self.sub = EzSubscriber(MyTopic.OUTPUT, parent=self, bridge=bridge)
 self.pub = EzPublisher(MyTopic.INPUT, parent=self, bridge=bridge)
 ```
 
+## Runtime Topic Switching
+
+`EzSubscriber` can now switch topics directly.
+
+```python
+self.sub = EzSubscriber(MyTopic.A, parent=self, bridge=bridge)
+self.sub.connect(self.on_data)
+
+# Later, once the bridge is running:
+self.sub.set_topic(MyTopic.B)
+
+# Pause delivery entirely:
+self.sub.clear_topic()
+```
+
+Notes:
+
+- `set_topic(...)` and `clear_topic()` require a running bridge
+- both calls block until the bridge applies the change
+- `topic` reflects the currently active topic
+
 ## Processor Pipelines
 
 `ProcessorChain` is now attached explicitly and always runs off the UI thread.

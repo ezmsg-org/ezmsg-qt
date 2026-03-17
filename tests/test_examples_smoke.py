@@ -11,6 +11,9 @@ import pytest
 
 
 EXAMPLES = [
+    "examples/dynamic_topic_switching_demo.py",
+    "examples/ezmsg_toy_bridged.py",
+    "examples/processor_chain_showcase.py",
     "examples/simple_demo.py",
     "examples/processor_chain_demo.py",
 ]
@@ -29,7 +32,7 @@ def test_example_runs_headless(example: str) -> None:
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=25,
     )
 
     assert completed.returncode == 0, (

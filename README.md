@@ -90,6 +90,29 @@ if __name__ == "__main__":
 - Messages are passed between threads using Qt's thread-safe signal mechanism
 - All async complexity is hidden - user code is 100% synchronous
 
+## Runtime Topic Switching
+
+`EzSubscriber` can retarget to a new topic at runtime without reconnecting Qt slots.
+
+```python
+class TopicSwitcher(QtWidgets.QWidget):
+    def __init__(self, bridge: EzGuiBridge):
+        super().__init__()
+        self.sub = EzSubscriber(MyTopic.A, parent=self, bridge=bridge)
+        self.sub.connect(self.on_data)
+
+    def switch_to_b(self) -> None:
+        self.sub.set_topic(MyTopic.B)
+
+    def pause_updates(self) -> None:
+        self.sub.clear_topic()
+```
+
+- `set_topic(...)` blocks until the running bridge applies the switch
+- `clear_topic()` disconnects the subscriber from all topics
+- `topic` reflects the currently active topic
+- topic switching requires the subscriber to be attached to a running bridge
+
 ## Local Processing (GraphRunner)
 
 If the GUI needs additional computation, you can run a small ezmsg graph
@@ -146,12 +169,14 @@ chain = (
 ### EzSubscriber
 
 ```python
-EzSubscriber(topic: Enum, parent: QObject = None)
+EzSubscriber(topic: Enum | str | None = None, parent: QObject = None)
 ```
 
 - `topic`: The topic enum to subscribe to
 - `bridge`: The bridge that owns this subscriber
 - `connect(slot)`: Connect a handler to receive messages
+- `set_topic(topic)`: Switch to a new topic on a running bridge
+- `clear_topic()`: Unsubscribe from the current topic on a running bridge
 - `received`: Qt signal emitted when a message arrives
 
 ### EzPublisher

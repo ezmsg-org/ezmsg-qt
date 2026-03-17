@@ -29,12 +29,9 @@ from ezmsg.qt import EzSubscriber
 
 # Topics for communication
 class BridgeTopic(Enum):
-    FROM_EZMSG = "GLOBAL_PING_TOPIC"  # ezmsg_toy publishes here
-    FROM_QT = "QT_MESSAGE_TOPIC"  # Qt publishes here
-    ECHO = "QT_ECHO_TOPIC"  # QtMessageReceiver echoes here
-
-    def __str__(self):
-        return self.value
+    FROM_EZMSG = "FROM_EZMSG"  # ezmsg_toy publishes here
+    FROM_QT = "FROM_QT"  # Qt publishes here
+    ECHO = "ECHO"  # QtMessageReceiver echoes here
 
 
 @dataclass
@@ -313,11 +310,11 @@ def main():
         },
         connections=[
             # ezmsg_toy publishes PING to this topic (Qt subscribes)
-            (system.PING.OUTPUT, "GLOBAL_PING_TOPIC"),
+            (system.PING.OUTPUT, BridgeTopic.FROM_EZMSG.name),
             # Qt publishes to this topic, QtMessageReceiver subscribes
-            ("QT_MESSAGE_TOPIC", qt_receiver.INPUT),
+            (BridgeTopic.FROM_QT.name, qt_receiver.INPUT),
             # QtMessageReceiver echoes back (Qt can see it too)
-            (qt_receiver.OUTPUT, "QT_ECHO_TOPIC"),
+            (qt_receiver.OUTPUT, BridgeTopic.ECHO.name),
         ],
         process_components=[system, qt_receiver],
     )

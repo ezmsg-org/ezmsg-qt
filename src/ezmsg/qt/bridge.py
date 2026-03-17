@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import logging
 import signal
@@ -30,11 +31,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_TOPIC_SWITCH_TIMEOUT = 5.0
+
 
 @dataclass
 class _SubscriberRuntime:
-    client: Any
-    task: asyncio.Task[None]
+    switch_lock: asyncio.Lock
+    client: Any | None = None
+    task: asyncio.Task[None] | None = None
+    active_topic: str | None = None
 
 
 @dataclass
@@ -105,6 +110,11 @@ class EzGuiBridge:
         self._wakeup_sock_w: socket.socket | None = None
         self._wakeup_prev_fd: int | None = None
 
+    @property
+    def running(self) -> bool:
+        """Whether the bridge is active and ready to service runtime requests."""
+        return self._running and self._loop is not None and not self._loop.is_closed()
+
     def attach(self, attachable):
         """Attach a subscriber, publisher, or processor pipeline to this bridge."""
         from .chain import ProcessorChain
@@ -150,6 +160,21 @@ class EzGuiBridge:
                 self._setup_subscriber(subscriber), self._loop
             ).result()
 
+    def _set_subscriber_topic(self, subscriber: EzSubscriber, topic) -> None:
+        if not self.running or self._loop is None:
+            raise RuntimeError(
+                "EzSubscriber topic switching requires a running EzGuiBridge"
+            )
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._switch_subscriber(subscriber, topic), self._loop
+        )
+        try:
+            future.result(timeout=_TOPIC_SWITCH_TIMEOUT)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("Timed out waiting for subscriber topic switch") from exc
+
     def _attach_publisher(self, publisher: EzPublisher) -> None:
         key = id(publisher)
         if key in self._publishers:
@@ -192,7 +217,7 @@ class EzGuiBridge:
             return
         try:
             asyncio.run_coroutine_threadsafe(
-                self._close_subscriber_runtime(runtime), self._loop
+                self._close_subscriber_runtime(runtime, subscriber), self._loop
             ).result()
         except RuntimeError:
             logger.debug("Subscriber detached after loop shutdown")
@@ -315,26 +340,63 @@ class EzGuiBridge:
         self._sidecar = runner
         self._compiled_pipelines = compiled
 
-    async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
-        key = id(ez_sub)
-        if key in self._subscriber_runtime:
-            return
-
-        topic = normalize_topic(ez_sub.topic)
+    @staticmethod
+    def _subscriber_client_kwargs(ez_sub: EzSubscriber) -> dict[str, object]:
         sub_kwargs: dict[str, object] = {}
         if ez_sub.leaky:
             sub_kwargs["leaky"] = True
             if ez_sub.max_queue is not None:
                 sub_kwargs["max_queue"] = ez_sub.max_queue
+        return sub_kwargs
 
-        client = await self._context.subscriber(topic, **sub_kwargs)
-        ez_sub._sub = client
-        task = asyncio.create_task(
-            self._subscriber_loop(ez_sub, client),
-            name=f"sub-{topic}",
-        )
-        self._track_task(task)
-        self._subscriber_runtime[key] = _SubscriberRuntime(client=client, task=task)
+    async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
+        key = id(ez_sub)
+        if key in self._subscriber_runtime:
+            return
+
+        runtime = _SubscriberRuntime(switch_lock=asyncio.Lock())
+        self._subscriber_runtime[key] = runtime
+
+        if ez_sub._desired_topic is not None:
+            await self._switch_subscriber(ez_sub, ez_sub._desired_topic)
+
+    async def _switch_subscriber(self, ez_sub: EzSubscriber, topic) -> None:
+        key = id(ez_sub)
+        runtime = self._subscriber_runtime.get(key)
+        if runtime is None:
+            raise RuntimeError("Subscriber is not initialized on this bridge")
+
+        desired_topic = None if topic is None else normalize_topic(topic)
+
+        async with runtime.switch_lock:
+            ez_sub._emit_epoch += 1
+
+            if runtime.active_topic == desired_topic:
+                ez_sub._topic = topic
+                ez_sub._desired_topic = topic
+                return
+
+            await self._close_subscriber_client(runtime)
+            ez_sub._sub = None
+
+            try:
+                if desired_topic is not None:
+                    client = await self._context.subscriber(
+                        desired_topic, **self._subscriber_client_kwargs(ez_sub)
+                    )
+                    runtime.client = client
+                    ez_sub._sub = client
+                    runtime.task = self._start_subscriber_task(ez_sub, runtime)
+            except Exception:
+                runtime.active_topic = None
+                ez_sub._sub = None
+                ez_sub._topic = None
+                raise
+
+            runtime.active_topic = desired_topic
+            ez_sub._sub = runtime.client
+            ez_sub._topic = topic
+            ez_sub._desired_topic = topic
 
     async def _setup_publisher(self, ez_pub: EzPublisher) -> None:
         key = id(ez_pub)
@@ -415,8 +477,9 @@ class EzGuiBridge:
 
         try:
             while self._running:
+                epoch = ez_sub._emit_epoch
                 msg = await sub.recv()
-                self._dispatcher.schedule(ez_sub._on_message, msg)
+                self._dispatcher.schedule(ez_sub._on_message, msg, epoch)
                 if rate is not None:
                     await rate.sleep()
         except asyncio.CancelledError:
@@ -445,15 +508,46 @@ class EzGuiBridge:
         except Exception:
             logger.exception("Error in pipeline loop for %s", compiled.chain._chain_id)
 
+    def _start_subscriber_task(
+        self, ez_sub: EzSubscriber, runtime: _SubscriberRuntime
+    ) -> asyncio.Task[None]:
+        if runtime.client is None:
+            raise RuntimeError("Subscriber client is not initialized")
+
+        task = asyncio.create_task(
+            self._subscriber_loop(ez_sub, runtime.client),
+            name=f"sub-{runtime.active_topic or 'dynamic'}",
+        )
+        self._track_task(task)
+        return task
+
+    async def _close_subscriber_client(self, runtime: _SubscriberRuntime) -> None:
+        if runtime.task is not None:
+            runtime.task.cancel()
+            await asyncio.gather(runtime.task, return_exceptions=True)
+            runtime.task = None
+
+        if runtime.client is not None:
+            client = runtime.client
+            runtime.client = None
+            client.close()
+            await client.wait_closed()
+            self._context._clients.discard(client)
+
     def _track_task(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _close_subscriber_runtime(self, runtime: _SubscriberRuntime) -> None:
-        runtime.task.cancel()
-        await asyncio.gather(runtime.task, return_exceptions=True)
-        runtime.client.close()
-        await runtime.client.wait_closed()
+    async def _close_subscriber_runtime(
+        self, runtime: _SubscriberRuntime, subscriber: EzSubscriber | None = None
+    ) -> None:
+        runtime.active_topic = None
+        await self._close_subscriber_client(runtime)
+
+        if subscriber is not None:
+            subscriber._sub = None
+            subscriber._topic = None
+            subscriber._desired_topic = None
 
     async def _close_publisher_runtime(self, runtime: _PublisherRuntime) -> None:
         runtime.task.cancel()
