@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from importlib import import_module
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -22,6 +23,12 @@ if TYPE_CHECKING:
 
 _INPUT_STREAM_NAMES = ("INPUT_SIGNAL", "INPUT")
 _OUTPUT_STREAM_NAMES = ("OUTPUT_SIGNAL", "OUTPUT")
+
+_stream_module = import_module("ezmsg.core.stream")
+# TODO: Drop this fallback once a released ezmsg package exposes InputTopic /
+# OutputTopic consistently at runtime.
+_INPUT_BOUNDARY = getattr(_stream_module, "InputTopic", ez.InputStream)
+_OUTPUT_BOUNDARY = getattr(_stream_module, "OutputTopic", ez.OutputStream)
 
 
 def normalize_topic(topic: str | Enum) -> str:
@@ -61,8 +68,8 @@ def _detect_stream_names(unit: ez.Unit) -> tuple[str, str]:
 class ProcessorGroupCollection(ez.Collection):
     """Collection wrapper for a processor group."""
 
-    INPUT = ez.InputStream(Any)
-    OUTPUT = ez.OutputStream(Any)
+    INPUT = _INPUT_BOUNDARY(Any)
+    OUTPUT = _OUTPUT_BOUNDARY(Any)
 
     def __init__(self, processors: list[Any]):
         super().__init__()

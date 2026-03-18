@@ -90,6 +90,8 @@ class EzSession:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._shutdown = threading.Event()
+        self._context_ready = threading.Event()
+        self._startup_release = threading.Event()
         self._setup_complete = threading.Event()
         self._setup_error: BaseException | None = None
         self._running = False
@@ -278,12 +280,13 @@ class EzSession:
         self._running = True
         self._setup_error = None
         self._shutdown.clear()
+        self._context_ready.clear()
+        self._startup_release.clear()
         self._setup_complete.clear()
         if self._dispatcher is None:
             self._dispatcher = _QtSignalDispatcher(QtWidgets.QApplication.instance())
         self._install_sigint_handler()
 
-        self._prepare_sidecar()
         self._context = GraphContext(self._graph_address)
 
         self._thread = threading.Thread(
@@ -292,11 +295,20 @@ class EzSession:
         self._thread.start()
 
         try:
+            if not self._context_ready.wait(timeout=30.0):
+                if self._setup_error is not None:
+                    raise RuntimeError("EzSession setup failed") from self._setup_error
+                raise RuntimeError("EzSession setup timed out")
+
+            self._prepare_sidecar()
+            self._startup_release.set()
+
             if not self._setup_complete.wait(timeout=30.0):
                 raise RuntimeError("EzSession setup timed out")
             if self._setup_error is not None:
                 raise RuntimeError("EzSession setup failed") from self._setup_error
         except Exception:
+            self._startup_release.set()
             self._abort_startup()
             raise
 
@@ -345,6 +357,8 @@ class EzSession:
             try:
                 await self._context.__aenter__()
                 self._context_entered = True
+                self._context_ready.set()
+                await asyncio.to_thread(self._startup_release.wait)
                 await self._async_setup()
             except BaseException as exc:
                 self._setup_error = exc
@@ -373,8 +387,8 @@ class EzSession:
     def _prepare_sidecar(self) -> None:
         """Start the sidecar runner before entering the session graph context.
 
-        This lets the session reuse the sidecar-owned graph address when it needs
-        to spawn a new graph server for compiled processor chains.
+        This runs after the session graph context is ready, so sidecar pipelines
+        join the same graph without replacing the session GraphContext.
         """
         pipelines = list(self._pipelines.values())
         if not pipelines:
@@ -388,13 +402,11 @@ class EzSession:
             components=components,
             connections=connections,
             process_components=process_components,
-            graph_address=self._graph_address,
+            graph_address=self._require_graph_address(),
         )
         runner.start()
         self._sidecar = runner
         self._compiled_pipelines = compiled_pipelines
-        if self._graph_address is None and runner.graph_address is not None:
-            self._graph_address = runner.graph_address
 
     @staticmethod
     def _subscriber_client_kwargs(ez_sub: EzSubscriber) -> dict[str, object]:
