@@ -21,7 +21,7 @@ from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 from ezmsg.qt import ProcessorChain
 
@@ -117,7 +117,7 @@ class SensorSimulator(ez.Unit):
 class ProcessedDataWidget(QtWidgets.QWidget):
     """Widget showing processed sensor data with auto-gating."""
 
-    def __init__(self, bridge: EzGuiBridge, parent=None):
+    def __init__(self, session: EzSession, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -155,7 +155,7 @@ class ProcessedDataWidget(QtWidgets.QWidget):
             .parallel(LowPassFilter, ScaleProcessor)  # Sidecar (grouped)
             .local(ThresholdDetector)
             .connect(self.on_data)
-            .attach(bridge)
+            .attach(session)
         )
 
     def on_data(self, status: str):
@@ -184,7 +184,7 @@ class ProcessedDataWidget(QtWidgets.QWidget):
 class RawDataWidget(QtWidgets.QWidget):
     """Widget showing raw sensor data (no processing)."""
 
-    def __init__(self, bridge: EzGuiBridge, parent=None):
+    def __init__(self, session: EzSession, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -208,7 +208,7 @@ class RawDataWidget(QtWidgets.QWidget):
         layout.addStretch()
 
         # Direct subscription without processor chain
-        self.sub = EzSubscriber(DataTopic.SENSOR_DATA, parent=self, bridge=bridge)
+        self.sub = EzSubscriber(DataTopic.SENSOR_DATA, parent=self, session=session)
         self.sub.connect(self.on_data)
 
     def on_data(self, value: float):
@@ -220,7 +220,7 @@ class RawDataWidget(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QMainWindow):
     """Main window with tabbed interface to demonstrate auto-gating."""
 
-    def __init__(self, bridge: EzGuiBridge):
+    def __init__(self, session: EzSession):
         super().__init__()
         self.setWindowTitle("Processor Chains Showcase")
         self.setMinimumSize(500, 400)
@@ -230,8 +230,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(tabs)
 
         # Add tabs
-        tabs.addTab(ProcessedDataWidget(bridge), "Processed (Auto-Gated)")
-        tabs.addTab(RawDataWidget(bridge), "Raw Data")
+        tabs.addTab(ProcessedDataWidget(session), "Processed (Auto-Gated)")
+        tabs.addTab(RawDataWidget(session), "Raw Data")
 
         # Instructions
         status_bar = self.statusBar()
@@ -255,14 +255,14 @@ def main():
     )
     runner.start()
 
-    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+    session = EzSession(graph_address=runner.graph_address)
 
     # Create main window
-    window = MainWindow(bridge)
+    window = MainWindow(session)
     window.show()
 
     try:
-        with bridge:
+        with session:
             auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)

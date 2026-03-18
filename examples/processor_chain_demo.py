@@ -16,7 +16,7 @@ from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge, ProcessorChain
+from ezmsg.qt import EzSession, ProcessorChain
 
 
 class DemoTopic(Enum):
@@ -64,7 +64,7 @@ class NumberGenerator(ez.Unit):
 
 
 class DemoWidget(QtWidgets.QWidget):
-    def __init__(self, bridge: EzGuiBridge):
+    def __init__(self, session: EzSession):
         super().__init__()
         self.setWindowTitle("Processor Chain Demo")
 
@@ -79,7 +79,7 @@ class DemoWidget(QtWidgets.QWidget):
             .parallel(DoubleProcessor)
             .local(SquareProcessor)
             .connect(self.on_result)
-            .attach(bridge)
+            .attach(session)
         )
 
     def on_result(self, value: float):
@@ -99,14 +99,14 @@ def main():
     )
     runner.start()
 
-    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+    session = EzSession(graph_address=runner.graph_address)
 
     # Create widget
-    widget = DemoWidget(bridge)
+    widget = DemoWidget(session)
     widget.show()
 
     try:
-        with bridge:
+        with session:
             auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)

@@ -4,7 +4,7 @@ Minimal reproduction and fix verification for GraphRunner shutdown issue.
 
 PROBLEM
 =======
-When a "bridge-like" component (background thread with async event loop) creates
+When a "session-like" component (background thread with async event loop) creates
 a sidecar GraphRunner, calling sidecar.stop() from within the async context
 causes a deadlock.
 
@@ -30,17 +30,17 @@ Call sidecar.stop() from the MAIN THREAD (outside the async context), not from
 within the background thread's async cleanup. This allows the event loop to
 continue processing GraphServer notifications while the sidecar shuts down.
 
-In EzGuiBridge, this means:
+In EzSession, this means:
 - Move sidecar.stop() from _async_cleanup() to __exit__()
 - Call it BEFORE signaling the background thread to stop
 
 RELATED ISSUE: STARTUP DEADLOCK
 ===============================
 A similar deadlock can occur during startup if:
-1. Bridge creates a subscriber for a topic (e.g., OUTPUT_TOPIC)
+1. Session creates a subscriber for a topic (e.g., OUTPUT_TOPIC)
 2. Sidecar starts and creates a publisher for the same topic
-3. GraphServer tries to notify bridge's subscriber about the new publisher
-4. But bridge's event loop is blocked waiting for sidecar.start() to complete
+3. GraphServer tries to notify the session subscriber about the new publisher
+4. But the session event loop is blocked waiting for sidecar.start() to complete
 
 This is avoided by starting the sidecar BEFORE creating subscribers for its
 output topics.
@@ -129,9 +129,9 @@ class Passthrough3(ez.Unit):
 from ezmsg.core.graphcontext import GraphContext
 
 
-class BridgeLikeContext:
+class SessionLikeContext:
     """
-    Mimics the EzGuiBridge - has its own async loop in a background thread,
+    Mimics the EzSession runtime - has its own async loop in a background thread,
     with a GraphContext that creates its own subscribers.
     """
 
@@ -153,26 +153,26 @@ class BridgeLikeContext:
         return self
 
     def __exit__(self, *args):
-        print("[Bridge] __exit__ starting...", flush=True)
+        print("[Session] __exit__ starting...", flush=True)
         self._shutdown.set()
 
         # FIX: Stop sidecar from MAIN THREAD, not from async context!
         # This avoids the deadlock where sidecar needs event loop to process
         # GraphServer notifications, but event loop is blocked on sidecar.stop()
         if self._sidecar is not None:
-            print("[Bridge] Stopping sidecar from main thread...", flush=True)
+            print("[Session] Stopping sidecar from main thread...", flush=True)
             self._sidecar.stop()
             self._sidecar = None
-            print("[Bridge] Sidecar stopped", flush=True)
+            print("[Session] Sidecar stopped", flush=True)
 
         if self._thread is not None:
-            print("[Bridge] Joining background thread...", flush=True)
+            print("[Session] Joining background thread...", flush=True)
             self._thread.join(timeout=10.0)
             if self._thread.is_alive():
-                print("[Bridge] WARNING: Thread still alive after 10s!")
+                print("[Session] WARNING: Thread still alive after 10s!")
             else:
-                print("[Bridge] Thread joined", flush=True)
-        print("[Bridge] __exit__ complete", flush=True)
+                print("[Session] Thread joined", flush=True)
+        print("[Session] __exit__ complete", flush=True)
 
     def _run_async_loop(self):
         self._loop = asyncio.new_event_loop()
@@ -183,14 +183,14 @@ class BridgeLikeContext:
             self._loop.close()
 
     async def _async_main(self):
-        print("[Bridge] _async_main starting...", flush=True)
-        # Create our own GraphContext (like EzGuiBridge does)
+        print("[Session] _async_main starting...", flush=True)
+        # Create our own GraphContext (like EzSession does)
         self._context = GraphContext(self._graph_address)
         await self._context.__aenter__()
-        print("[Bridge] GraphContext entered", flush=True)
+        print("[Session] GraphContext entered", flush=True)
 
-        # Create and start sidecar FIRST (like actual bridge does in _setup_chains)
-        print("[Bridge] Creating sidecar from async context...", flush=True)
+        # Create and start sidecar FIRST (like the real session runtime does)
+        print("[Session] Creating sidecar from async context...", flush=True)
         gate = MessageGate()
         gate.apply_settings(MessageGateSettings(start_open=True))
         p1 = Passthrough1()
@@ -206,49 +206,49 @@ class BridgeLikeContext:
             ],
             graph_address=self._graph_address,
         )
-        print("[Bridge] Starting sidecar (sync call from async)...", flush=True)
-        self._sidecar.start()  # BLOCKING - like actual bridge!
-        print("[Bridge] Sidecar started", flush=True)
+        print("[Session] Starting sidecar (sync call from async)...", flush=True)
+        self._sidecar.start()  # BLOCKING - like the real session runtime
+        print("[Session] Sidecar started", flush=True)
 
-        await asyncio.sleep(0.5)  # Like actual bridge does
+        await asyncio.sleep(0.5)  # Like the real session runtime does
 
-        # NOW create subscriber for sidecar's output (like actual bridge does AFTER sidecar starts)
-        print("[Bridge] Creating subscriber for OUTPUT_TOPIC...", flush=True)
+        # NOW create subscriber for sidecar's output (like the real session does after sidecar start)
+        print("[Session] Creating subscriber for OUTPUT_TOPIC...", flush=True)
         sub = await self._context.subscriber("OUTPUT_TOPIC")
-        print("[Bridge] Subscriber created", flush=True)
+        print("[Session] Subscriber created", flush=True)
         task = asyncio.create_task(self._subscriber_loop(sub))
         self._tasks.add(task)
 
         self._setup_complete.set()
-        print("[Bridge] Setup complete, waiting for shutdown...", flush=True)
+        print("[Session] Setup complete, waiting for shutdown...", flush=True)
 
         # Wait for shutdown
         while not self._shutdown.is_set():
             await asyncio.sleep(0.1)
 
         # Cleanup - sidecar is already stopped from __exit__ (main thread)
-        print("[Bridge] Async cleanup starting...", flush=True)
+        print("[Session] Async cleanup starting...", flush=True)
 
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self._context.__aexit__(None, None, None)
-        print("[Bridge] Async cleanup complete", flush=True)
+        print("[Session] Async cleanup complete", flush=True)
 
     async def _subscriber_loop(self, sub):
-        """Receive messages from OUTPUT_TOPIC (like EzGuiBridge does)."""
+        """Receive messages from OUTPUT_TOPIC (like EzSession does)."""
         try:
             while not self._shutdown.is_set():
                 msg = await sub.recv()
                 if int(msg) % 20 == 0:
-                    print(f"[BridgeSub] {msg}", flush=True)
+                    print(f"[SessionSub] {msg}", flush=True)
         except asyncio.CancelledError:
             pass
 
 
 def main():
     print("=" * 60)
-    print("Dual GraphRunner Shutdown Test (Bridge-like setup)")
+    print("Dual GraphRunner Shutdown Test (Session-like setup)")
     print("=" * 60)
 
     # Create primary runner with data generator
@@ -267,14 +267,17 @@ def main():
     # Give primary time to initialize
     time.sleep(0.5)
 
-    # Use our bridge-like context (mimics EzGuiBridge)
-    print("[Main] Creating bridge-like context...", flush=True)
+    # Use our session-like context (mimics EzSession)
+    print("[Main] Creating session-like context...", flush=True)
     try:
-        with BridgeLikeContext(primary.graph_address) as bridge:
-            print("[Main] Bridge active, running for 3 seconds...", flush=True)
+        with SessionLikeContext(primary.graph_address) as session:
+            print("[Main] Session active, running for 3 seconds...", flush=True)
             time.sleep(3)
-            print("[Main] Exiting bridge context (will try to stop sidecar)...", flush=True)
-        print("[Main] Bridge context exited", flush=True)
+            print(
+                "[Main] Exiting session context (will try to stop sidecar)...",
+                flush=True,
+            )
+        print("[Main] Session context exited", flush=True)
     finally:
         print("[Main] Stopping primary...", flush=True)
         if primary.running:

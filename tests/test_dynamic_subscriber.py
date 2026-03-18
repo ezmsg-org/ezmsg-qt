@@ -7,7 +7,7 @@ from typing import cast
 
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
 from ezmsg.qt import EzSubscriber
 
@@ -26,18 +26,17 @@ def _app() -> QtWidgets.QApplication:
 
 
 def test_set_topic_switches_delivery(qtbot):
-    app = _app()
-    bridge = EzGuiBridge(app)
+    session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
     received: list[str] = []
-    sub = EzSubscriber(DemoTopic.A, parent=widget, bridge=bridge)
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session)
     sub.connect(received.append)
-    pub_a = EzPublisher(DemoTopic.A, parent=widget, bridge=bridge)
-    pub_b = EzPublisher(DemoTopic.B, parent=widget, bridge=bridge)
+    pub_a = EzPublisher(DemoTopic.A, parent=widget, session=session)
+    pub_b = EzPublisher(DemoTopic.B, parent=widget, session=session)
 
-    with bridge:
+    with session:
         pub_a.emit("a0")
         qtbot.waitUntil(lambda: received == ["a0"], timeout=2000)
 
@@ -53,17 +52,16 @@ def test_set_topic_switches_delivery(qtbot):
 
 
 def test_clear_topic_stops_delivery(qtbot):
-    app = _app()
-    bridge = EzGuiBridge(app)
+    session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
     received: list[str] = []
-    sub = EzSubscriber(DemoTopic.A, parent=widget, bridge=bridge)
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session)
     sub.connect(received.append)
-    pub_a = EzPublisher(DemoTopic.A, parent=widget, bridge=bridge)
+    pub_a = EzPublisher(DemoTopic.A, parent=widget, session=session)
 
-    with bridge:
+    with session:
         pub_a.emit("a0")
         qtbot.waitUntil(lambda: received == ["a0"], timeout=2000)
 
@@ -77,18 +75,17 @@ def test_clear_topic_stops_delivery(qtbot):
 
 
 def test_switch_suppresses_queued_stale_messages(qtbot):
-    app = _app()
-    bridge = EzGuiBridge(app)
+    session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
     received: list[str] = []
-    sub = EzSubscriber(DemoTopic.A, parent=widget, bridge=bridge)
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session)
     sub.connect(received.append)
-    pub_a = EzPublisher(DemoTopic.A, parent=widget, bridge=bridge)
-    pub_b = EzPublisher(DemoTopic.B, parent=widget, bridge=bridge)
+    pub_a = EzPublisher(DemoTopic.A, parent=widget, session=session)
+    pub_b = EzPublisher(DemoTopic.B, parent=widget, session=session)
 
-    with bridge:
+    with session:
         pub_a.emit("stale")
         sub.set_topic(DemoTopic.B)
         pub_b.emit("fresh")
@@ -101,37 +98,58 @@ def test_switch_suppresses_queued_stale_messages(qtbot):
 
 
 def test_switch_does_not_leak_subscriber_clients(qtbot):
-    app = _app()
-    bridge = EzGuiBridge(app)
+    session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
-    sub = EzSubscriber(DemoTopic.A, parent=widget, bridge=bridge)
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session)
 
-    with bridge:
-        initial_clients = len(bridge._context._clients)
+    with session:
+        initial_clients = len(session._context._clients)
 
         sub.set_topic(DemoTopic.B)
         sub.set_topic(DemoTopic.C)
 
-        assert len(bridge._context._clients) == initial_clients
+        assert len(session._context._clients) == initial_clients
 
 
 def test_attach_after_start_supports_switching(qtbot):
-    app = _app()
-    bridge = EzGuiBridge(app)
+    session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
     received: list[str] = []
 
-    with bridge:
-        sub = EzSubscriber(None, parent=widget, bridge=bridge)
+    with session:
+        sub = EzSubscriber(None, parent=widget, session=session)
         sub.connect(received.append)
-        pub_c = EzPublisher(DemoTopic.C, parent=widget, bridge=bridge)
+        pub_c = EzPublisher(DemoTopic.C, parent=widget, session=session)
 
         sub.set_topic(DemoTopic.C)
         assert sub.topic == DemoTopic.C
 
         pub_c.emit("c0")
         qtbot.waitUntil(lambda: received == ["c0"], timeout=2000)
+
+
+def test_switch_signals_emit_in_order(qtbot):
+    session = EzSession()
+    widget = QtWidgets.QWidget()
+    qtbot.addWidget(widget)
+
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session)
+    events: list[tuple[str, object | None]] = []
+    sub.switch_started.connect(lambda topic: events.append(("started", topic)))
+    sub.topic_changed.connect(lambda topic: events.append(("changed", topic)))
+    sub.topic_cleared.connect(lambda: events.append(("cleared", None)))
+
+    with session:
+        sub.set_topic(DemoTopic.B)
+        sub.clear_topic()
+
+    assert events == [
+        ("started", DemoTopic.B),
+        ("changed", DemoTopic.B),
+        ("started", None),
+        ("cleared", None),
+    ]

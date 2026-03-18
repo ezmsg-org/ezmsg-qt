@@ -12,7 +12,7 @@ from qtpy import QtCore
 from .sidecar import normalize_topic
 
 if TYPE_CHECKING:
-    from .bridge import EzGuiBridge
+    from .session import EzSession
     from ezmsg.core.subclient import Subscriber
 
 
@@ -42,13 +42,17 @@ class EzSubscriber(QtCore.QObject):
     """
 
     received = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
+    switch_started = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
+    topic_changed = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
+    topic_cleared = QtCore.Signal()  # pyright: ignore[reportPrivateImportUsage]
+    switch_failed = QtCore.Signal(object, str)  # pyright: ignore[reportPrivateImportUsage]
 
     def __init__(
         self,
         topic: TopicLike = None,
         parent: QtCore.QObject | None = None,
         *,
-        bridge: EzGuiBridge | None = None,
+        session: EzSession | None = None,
         leaky: bool = False,
         max_queue: int | None = None,
         throttle_hz: float | None = None,
@@ -68,8 +72,8 @@ class EzSubscriber(QtCore.QObject):
         super().__init__(parent)
         self._topic = self._validate_topic(topic)
         self._desired_topic = self._topic
-        self._sub: Subscriber | None = None  # Set by EzGuiBridge during setup
-        self._bridge: EzGuiBridge | None = None
+        self._sub: Subscriber | None = None  # Set by EzSession during setup
+        self._session: EzSession | None = None
         self._leaky = bool(leaky)
         self._max_queue = max_queue
         self._throttle_hz = throttle_hz
@@ -80,8 +84,8 @@ class EzSubscriber(QtCore.QObject):
         if self._throttle_hz is not None and self._throttle_hz <= 0:
             raise ValueError("throttle_hz must be positive")
 
-        if bridge is not None:
-            bridge.attach(self)
+        if session is not None:
+            session.attach(self)
 
     @property
     def topic(self) -> TopicLike:
@@ -89,9 +93,9 @@ class EzSubscriber(QtCore.QObject):
         return self._topic
 
     @property
-    def bridge(self) -> EzGuiBridge | None:
-        """The bridge this subscriber is attached to, if any."""
-        return self._bridge
+    def session(self) -> EzSession | None:
+        """The session this subscriber is attached to, if any."""
+        return self._session
 
     @property
     def leaky(self) -> bool:
@@ -118,34 +122,40 @@ class EzSubscriber(QtCore.QObject):
         self.received.connect(slot)
 
     def set_topic(self, topic: Enum | str) -> None:
-        """Switch to a new topic on a running bridge.
+        """Switch to a new topic on a running session.
 
-        This call blocks until the bridge applies the topic change.
+        This call blocks until the session applies the topic change.
         """
         validated = self._validate_topic(topic)
-        bridge = self._require_running_bridge()
+        session = self._require_running_session()
 
         previous_desired = self._desired_topic
         self._desired_topic = validated
+        self.switch_started.emit(validated)
         try:
-            bridge._set_subscriber_topic(self, validated)
-        except Exception:
+            session._set_subscriber_topic(self, validated)
+            self.topic_changed.emit(self._topic)
+        except Exception as exc:
             self._desired_topic = previous_desired
+            self.switch_failed.emit(validated, str(exc))
             raise
 
     def clear_topic(self) -> None:
-        """Unsubscribe from the current topic on a running bridge.
+        """Unsubscribe from the current topic on a running session.
 
-        This call blocks until the bridge disconnects the route.
+        This call blocks until the session disconnects the route.
         """
-        bridge = self._require_running_bridge()
+        session = self._require_running_session()
 
         previous_desired = self._desired_topic
         self._desired_topic = None
+        self.switch_started.emit(None)
         try:
-            bridge._set_subscriber_topic(self, None)
-        except Exception:
+            session._set_subscriber_topic(self, None)
+            self.topic_cleared.emit()
+        except Exception as exc:
             self._desired_topic = previous_desired
+            self.switch_failed.emit(None, str(exc))
             raise
 
     @QtCore.Slot(object, int)  # pyright: ignore[reportPrivateImportUsage]
@@ -155,21 +165,23 @@ class EzSubscriber(QtCore.QObject):
             return
         self.received.emit(msg)
 
-    def _bind_bridge(self, bridge: EzGuiBridge) -> None:
-        if self._bridge is not None and self._bridge is not bridge:
-            raise RuntimeError("EzSubscriber is already attached to a different bridge")
-        self._bridge = bridge
+    def _bind_session(self, session: EzSession) -> None:
+        if self._session is not None and self._session is not session:
+            raise RuntimeError(
+                "EzSubscriber is already attached to a different session"
+            )
+        self._session = session
 
-    def _require_running_bridge(self) -> EzGuiBridge:
-        if self._bridge is None:
+    def _require_running_session(self) -> EzSession:
+        if self._session is None:
             raise RuntimeError(
-                "EzSubscriber must be attached to a bridge before switching"
+                "EzSubscriber must be attached to a session before switching"
             )
-        if not self._bridge.running:
+        if not self._session.running:
             raise RuntimeError(
-                "EzSubscriber topic switching requires a running EzGuiBridge"
+                "EzSubscriber topic switching requires a running EzSession"
             )
-        return self._bridge
+        return self._session
 
     @staticmethod
     def _validate_topic(topic: TopicLike) -> TopicLike:

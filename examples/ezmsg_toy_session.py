@@ -1,11 +1,11 @@
 """
-ezmsg_toy connected to Qt via EzGuiBridge + GraphRunner.
+ezmsg_toy connected to Qt via EzSession + GraphRunner.
 
 This test proves:
 1. GraphRunner runs ezmsg_toy in a background thread
-2. EzGuiBridge connects a Qt widget to the "GLOBAL_PING_TOPIC"
-3. Messages flow from ezmsg -> Qt via the bridge (subscribe)
-4. Messages flow from Qt -> ezmsg via the bridge (publish)
+2. EzSession connects a Qt widget to the "GLOBAL_PING_TOPIC"
+3. Messages flow from ezmsg -> Qt via the session (subscribe)
+4. Messages flow from Qt -> ezmsg via the session (publish)
 """
 
 import asyncio
@@ -22,13 +22,13 @@ from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
 from ezmsg.qt import EzSubscriber
 
 
 # Topics for communication
-class BridgeTopic(Enum):
+class SessionTopic(Enum):
     FROM_EZMSG = "FROM_EZMSG"  # ezmsg_toy publishes here
     FROM_QT = "FROM_QT"  # Qt publishes here
     ECHO = "ECHO"  # QtMessageReceiver echoes here
@@ -206,12 +206,12 @@ class QtMessageReceiver(ez.Unit):
         yield self.OUTPUT, response
 
 
-class BridgedWindow(QtWidgets.QWidget):
-    """Qt window that sends and receives messages via the bridge."""
+class SessionWindow(QtWidgets.QWidget):
+    """Qt window that sends and receives messages via the session."""
 
-    def __init__(self, bridge: EzGuiBridge, parent=None):
+    def __init__(self, session: EzSession, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("ezmsg_toy + EzGuiBridge Test")
+        self.setWindowTitle("ezmsg_toy + EzSession Test")
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -256,20 +256,24 @@ class BridgedWindow(QtWidgets.QWidget):
 
         # --- ezmsg connections ---
         # Subscribe to messages from ezmsg_toy
-        self.ping_sub = EzSubscriber(BridgeTopic.FROM_EZMSG, parent=self, bridge=bridge)
+        self.ping_sub = EzSubscriber(
+            SessionTopic.FROM_EZMSG, parent=self, session=session
+        )
         self.ping_sub.connect(self.on_message_received)
 
         # Subscribe to echo responses from QtMessageReceiver
-        self.echo_sub = EzSubscriber(BridgeTopic.ECHO, parent=self, bridge=bridge)
+        self.echo_sub = EzSubscriber(SessionTopic.ECHO, parent=self, session=session)
         self.echo_sub.connect(self.on_echo_received)
 
         # Publish messages to ezmsg
-        self.message_pub = EzPublisher(BridgeTopic.FROM_QT, parent=self, bridge=bridge)
+        self.message_pub = EzPublisher(
+            SessionTopic.FROM_QT, parent=self, session=session
+        )
 
         self._log("Widget initialized")
 
     def on_send(self):
-        """Send message to ezmsg via the bridge."""
+        """Send message to ezmsg via the session."""
         text = self.message_input.text().strip()
         if text:
             self._log(f"Publishing: {text}")
@@ -302,7 +306,7 @@ def main():
     qt_receiver = QtMessageReceiver()
 
     print("[Main] Starting GraphRunner...")
-    system = TestSystem(TestSystemSettings(name="Bridged"))
+    system = TestSystem(TestSystemSettings(name="Session"))
     runner = GraphRunner(
         components={
             "SYSTEM": system,
@@ -310,30 +314,30 @@ def main():
         },
         connections=[
             # ezmsg_toy publishes PING to this topic (Qt subscribes)
-            (system.PING.OUTPUT, BridgeTopic.FROM_EZMSG.name),
+            (system.PING.OUTPUT, SessionTopic.FROM_EZMSG.name),
             # Qt publishes to this topic, QtMessageReceiver subscribes
-            (BridgeTopic.FROM_QT.name, qt_receiver.INPUT),
+            (SessionTopic.FROM_QT.name, qt_receiver.INPUT),
             # QtMessageReceiver echoes back (Qt can see it too)
-            (qt_receiver.OUTPUT, BridgeTopic.ECHO.name),
+            (qt_receiver.OUTPUT, SessionTopic.ECHO.name),
         ],
         process_components=[system, qt_receiver],
     )
 
     runner.start()
-    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+    session = EzSession(graph_address=runner.graph_address)
 
     # Create widget and attach Qt endpoints explicitly
-    print("[Main] Creating BridgedWindow...")
-    window = BridgedWindow(bridge)
+    print("[Main] Creating SessionWindow...")
+    window = SessionWindow(session)
     window.resize(500, 450)
     window.show()
 
     try:
-        with bridge:
+        with session:
             auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
-            print("[Main] Bridge active, entering Qt event loop...")
+            print("[Main] Session active, entering Qt event loop...")
             app.exec()
             print("[Main] Qt event loop exited")
             app.quit()

@@ -5,14 +5,13 @@ This package provides Qt widgets that can subscribe to and publish messages
 on ezmsg topics using a familiar Qt signal/slot pattern.
 
 Example:
-    from ezmsg.qt import EzSubscriber, EzPublisher, EzGuiBridge, ProcessorChain
+    from ezmsg.qt import EzSubscriber, EzPublisher, EzSession, ProcessorChain
 
     class MyWidget(QtWidgets.QWidget):
-        def __init__(self):
+        def __init__(self, session):
             super().__init__()
             # Simple subscription (no processing)
-            self.bridge = bridge
-            self.data_sub = EzSubscriber(MyTopic.OUTPUT, parent=self, bridge=bridge)
+            self.data_sub = EzSubscriber(MyTopic.OUTPUT, parent=self, session=session)
             self.data_sub.connect(self.on_data)
 
             # Processing pipeline with isolated and shared sidecar stages
@@ -21,7 +20,7 @@ Example:
                 .parallel(LowPassFilter, ScaleProcessor)
                 .local(ThresholdDetector)
                 .connect(self.on_processed)
-                .attach(bridge)
+                .attach(session)
             )
 
         def on_data(self, msg):
@@ -31,25 +30,25 @@ Example:
             pass
 
     app = QtWidgets.QApplication([])
-    bridge = EzGuiBridge(app)
-    window = MyWidget(bridge)
+    session = EzSession()
+    window = MyWidget(session)
     window.show()
 
-    with bridge:
+    with session:
         app.exec()
 """
 
-from .bridge import EzGuiBridge
 from .chain import ProcessorChain
 from .gate import GateMessage
 from .gate import MessageGate
 from .gate import MessageGateSettings
 from .publisher import EzPublisher
+from .session import EzSession
 from .settings_form import SettingsForm
 from .subscriber import EzSubscriber
 
 __all__ = [
-    "EzGuiBridge",
+    "EzSession",
     "EzPublisher",
     "EzSubscriber",
     "ProcessorChain",

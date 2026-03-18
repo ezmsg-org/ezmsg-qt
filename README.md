@@ -1,64 +1,48 @@
 # ezmsg-qt
 
-Qt-native pub/sub bridge that connects GUIs to running ezmsg graphs.
+Qt-native pub/sub runtime for connecting GUIs to ezmsg graphs.
 
 ## Overview
 
-`ezmsg-qt` provides a Qt-native interface for connecting widgets to ezmsg topics.
-Its purpose is to make GUI integration feel like standard Qt signal/slot code
-while still leveraging ezmsg's graph, backpressure, and sidecar execution.
-Instead of routing all messages through a single multiplexed channel, widgets
-subscribe to and publish on specific topics directly.
+`ezmsg-qt` lets Qt widgets publish to and subscribe from ezmsg topics using a
+familiar signal/slot style while keeping ezmsg runtime ownership explicit.
 
-When you need extra compute for UI-facing data, `EzGuiBridge` can also manage a
-sidecar `GraphRunner`, letting you run processing units off the UI thread while
-sharing the same GraphServer.
-
-## Installation
-
-```bash
-# With PyQt6
-pip install ezmsg-qt[pyqt6]
-
-# With PySide6
-pip install ezmsg-qt[pyside6]
-```
+- `EzSession` owns the ezmsg runtime thread, `GraphContext`, and sidecar pipelines
+- `EzSubscriber` and `EzPublisher` attach to a session
+- `ProcessorChain` compiles processing stages into a sidecar runtime owned by the session
 
 ## Quick Start
 
 ```python
 from enum import Enum, auto
 from qtpy import QtWidgets
-from ezmsg.qt import EzSubscriber, EzPublisher, EzGuiBridge
+
+from ezmsg.qt import EzPublisher, EzSession, EzSubscriber
 
 
-# Define topics (typically in your processing module)
 class VelocityTopic(Enum):
     INPUT_SETTINGS = auto()
     OUTPUT_DATA = auto()
 
 
 class VelocityWidget(QtWidgets.QWidget):
-    def __init__(self, bridge: EzGuiBridge):
+    def __init__(self, session: EzSession):
         super().__init__()
 
-        # Create UI
         self.slider = QtWidgets.QSlider()
         self.label = QtWidgets.QLabel("Waiting for data...")
 
-        # Create ezmsg connections
         self.data_sub = EzSubscriber(
             VelocityTopic.OUTPUT_DATA,
             parent=self,
-            bridge=bridge,
+            session=session,
         )
         self.settings_pub = EzPublisher(
             VelocityTopic.INPUT_SETTINGS,
             parent=self,
-            bridge=bridge,
+            session=session,
         )
 
-        # Connect like normal Qt signals
         self.data_sub.connect(self.on_data)
         self.slider.valueChanged.connect(self.on_slider)
 
@@ -69,26 +53,15 @@ class VelocityWidget(QtWidgets.QWidget):
         self.settings_pub.emit({"gain": value})
 
 
-def main():
+def main() -> None:
     app = QtWidgets.QApplication([])
-    bridge = EzGuiBridge(app)
-    window = VelocityWidget(bridge)
+    session = EzSession()
+    window = VelocityWidget(session)
     window.show()
 
-    with bridge:
+    with session:
         app.exec()
-
-
-if __name__ == "__main__":
-    main()
 ```
-
-## How It Works
-
-- `EzSubscriber` and `EzPublisher` are QObjects attached explicitly to an `EzGuiBridge`
-- `EzGuiBridge` manages a background asyncio thread that handles ezmsg communication
-- Messages are passed between threads using Qt's thread-safe signal mechanism
-- All async complexity is hidden - user code is 100% synchronous
 
 ## Runtime Topic Switching
 
@@ -96,9 +69,9 @@ if __name__ == "__main__":
 
 ```python
 class TopicSwitcher(QtWidgets.QWidget):
-    def __init__(self, bridge: EzGuiBridge):
+    def __init__(self, session: EzSession):
         super().__init__()
-        self.sub = EzSubscriber(MyTopic.A, parent=self, bridge=bridge)
+        self.sub = EzSubscriber(MyTopic.A, parent=self, session=session)
         self.sub.connect(self.on_data)
 
     def switch_to_b(self) -> None:
@@ -108,63 +81,64 @@ class TopicSwitcher(QtWidgets.QWidget):
         self.sub.clear_topic()
 ```
 
-- `set_topic(...)` blocks until the running bridge applies the switch
+- `set_topic(...)` blocks until the running session applies the switch
 - `clear_topic()` disconnects the subscriber from all topics
 - `topic` reflects the currently active topic
-- topic switching requires the subscriber to be attached to a running bridge
+- topic switching requires the subscriber to be attached to a running session
+- signals available for UI state: `switch_started`, `topic_changed`, `topic_cleared`, `switch_failed`
 
-## Local Processing (GraphRunner)
+## Local Processing
 
-If the GUI needs additional computation, you can run a small ezmsg graph
-alongside the app. Use a `GraphRunner` to launch the processing graph, then
-point the bridge at the runner's graph address.
-
-```python
-from ezmsg.core.backend import GraphRunner
-from ezmsg.qt import EzGuiBridge
-
-runner = GraphRunner(
-    components={"PLOTTER": PlotterCollection()},
-    connections=[
-        (DataTopic.RAW, PlotterCollection.INPUT),
-        (PlotterCollection.OUTPUT, DataTopic.PROCESSED),
-    ],
-    process_components=[PlotterCollection],
-)
-
-runner.start()
-bridge = EzGuiBridge(app, graph_address=runner.graph_address)
-try:
-    with bridge:
-        app.exec()
-finally:
-    if runner.running:
-        runner.stop()
-```
-
-## Processor Pipelines
-
-`ProcessorChain` compiles processing stages into a sidecar ezmsg runtime.
-
-- `.parallel(...)` runs a stage group in its own sidecar process
-- `.local(...)` runs a stage group in the shared sidecar process
-- neither mode runs on the Qt UI thread
+Use `ProcessorChain` when widget-facing data needs ezmsg processing off the UI thread.
 
 ```python
-from ezmsg.qt import EzGuiBridge, ProcessorChain
+from ezmsg.qt import EzSession, ProcessorChain
 
-bridge = EzGuiBridge(app)
+session = EzSession()
 
 chain = (
     ProcessorChain(MyTopic.RAW, parent=widget)
     .parallel(LowPassFilter)
     .local(ThresholdDetector)
     .connect(widget.on_processed)
-    .attach(bridge)
+    .attach(session)
 )
 ```
 
+- `.parallel(...)` runs a stage group in its own sidecar process
+- `.local(...)` runs a stage group in the shared sidecar process
+- neither mode runs on the Qt UI thread
+
+## External Graphs
+
+Point a session at an existing `GraphRunner` or `GraphServer` by providing
+`graph_address`.
+
+```python
+runner.start()
+session = EzSession(graph_address=runner.graph_address)
+try:
+    with session:
+        app.exec()
+finally:
+    if runner.running:
+        runner.stop()
+```
+
 ## API Reference
+
+### EzSession
+
+```python
+session = EzSession(graph_address=None)
+with session:
+    app.exec()
+```
+
+- `graph_address`: Optional GraphServer address
+- `attach(obj)`: Attach an `EzSubscriber`, `EzPublisher`, or `ProcessorChain`
+- `detach(obj)`: Detach an `EzSubscriber` or `EzPublisher`
+- `running`: Whether the session runtime is active
 
 ### EzSubscriber
 
@@ -172,31 +146,21 @@ chain = (
 EzSubscriber(topic: Enum | str | None = None, parent: QObject = None)
 ```
 
-- `topic`: The topic enum to subscribe to
-- `bridge`: The bridge that owns this subscriber
+- `session`: The session that owns this subscriber
 - `connect(slot)`: Connect a handler to receive messages
-- `set_topic(topic)`: Switch to a new topic on a running bridge
-- `clear_topic()`: Unsubscribe from the current topic on a running bridge
+- `set_topic(topic)`: Switch to a new topic on a running session
+- `clear_topic()`: Unsubscribe from the current topic on a running session
 - `received`: Qt signal emitted when a message arrives
+- `switch_started`, `topic_changed`, `topic_cleared`, `switch_failed`: lifecycle signals for runtime switching
 
 ### EzPublisher
 
 ```python
-EzPublisher(topic: Enum, parent: QObject = None)
+EzPublisher(topic: Enum | str | None = None, parent: QObject = None)
 ```
 
-- `topic`: The topic enum to publish to
-- `bridge`: The bridge that owns this publisher
+- `session`: The session that owns this publisher
 - `emit(message)`: Send a message to the topic
-
-### EzGuiBridge
-
-```python
-bridge = EzGuiBridge(app, graph_address=None)
-with bridge:
-    app.exec()
-```
-
-- `app`: The QApplication instance
-- `graph_address`: Optional GraphServer address (uses default if not specified)
-- `attach(obj)`: Attach an `EzSubscriber`, `EzPublisher`, or `ProcessorChain`
+- `set_topic(topic)`: Switch to a new topic on a running session
+- `clear_topic()`: Unpublish from the current topic on a running session
+- `switch_started`, `topic_changed`, `topic_cleared`, `switch_failed`: lifecycle signals for runtime switching

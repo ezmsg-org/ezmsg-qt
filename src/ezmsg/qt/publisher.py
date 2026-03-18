@@ -12,8 +12,10 @@ from typing import Literal
 
 from qtpy import QtCore
 
+from .sidecar import normalize_topic
+
 if TYPE_CHECKING:
-    from .bridge import EzGuiBridge
+    from .session import EzSession
     from ezmsg.core.pubclient import Publisher
 
 
@@ -24,6 +26,8 @@ QueuePolicy = Literal[
     "drop_latest",
     "coalesce_latest",
 ]
+
+TopicLike = Enum | str | None
 
 
 class EzPublisher(QtCore.QObject):
@@ -47,12 +51,17 @@ class EzPublisher(QtCore.QObject):
                 self.settings_pub.emit(VelocitySettings(gain=value))
     """
 
+    switch_started = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
+    topic_changed = QtCore.Signal(object)  # pyright: ignore[reportPrivateImportUsage]
+    topic_cleared = QtCore.Signal()  # pyright: ignore[reportPrivateImportUsage]
+    switch_failed = QtCore.Signal(object, str)  # pyright: ignore[reportPrivateImportUsage]
+
     def __init__(
         self,
-        topic: Enum,
+        topic: TopicLike = None,
         parent: QtCore.QObject | None = None,
         *,
-        bridge: EzGuiBridge | None = None,
+        session: EzSession | None = None,
         queue_policy: QueuePolicy = "unbounded",
         max_pending: int | None = None,
     ):
@@ -69,9 +78,10 @@ class EzPublisher(QtCore.QObject):
         if queue_policy in {"block", "drop_oldest", "drop_latest", "coalesce_latest"}:
             max_pending = 1 if max_pending is None else max_pending
 
-        self._topic = topic
-        self._pub: Publisher | None = None  # Set by EzGuiBridge during setup
-        self._bridge: EzGuiBridge | None = None
+        self._topic = self._validate_topic(topic)
+        self._desired_topic = self._topic
+        self._pub: Publisher | None = None  # Set by EzSession during setup
+        self._session: EzSession | None = None
         self._queue_policy = queue_policy
         self._max_pending = max_pending
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -79,18 +89,18 @@ class EzPublisher(QtCore.QObject):
         self._pending: deque[Any] = deque()
         self._pending_lock = threading.Lock()
 
-        if bridge is not None:
-            bridge.attach(self)
+        if session is not None:
+            session.attach(self)
 
     @property
-    def topic(self) -> Enum:
+    def topic(self) -> TopicLike:
         """The topic this publisher is bound to."""
         return self._topic
 
     @property
-    def bridge(self) -> EzGuiBridge | None:
-        """The bridge this publisher is attached to, if any."""
-        return self._bridge
+    def session(self) -> EzSession | None:
+        """The session this publisher is attached to, if any."""
+        return self._session
 
     def emit(self, message: Any) -> None:
         """
@@ -101,6 +111,9 @@ class EzPublisher(QtCore.QObject):
         Args:
             message: The message to publish.
         """
+        if self._desired_topic is None and self._topic is None:
+            raise RuntimeError("EzPublisher has no active topic")
+
         if self._loop is not None and self._async_queue is not None:
             if self._queue_policy == "block":
                 asyncio.run_coroutine_threadsafe(
@@ -114,15 +127,47 @@ class EzPublisher(QtCore.QObject):
         with self._pending_lock:
             self._enqueue_pending_locked(message)
 
-    def _bind_bridge(self, bridge: EzGuiBridge) -> None:
-        if self._bridge is not None and self._bridge is not bridge:
-            raise RuntimeError("EzPublisher is already attached to a different bridge")
-        self._bridge = bridge
+    def set_topic(self, topic: Enum | str) -> None:
+        """Switch to a new topic on a running session."""
+        validated = self._validate_topic(topic)
+        session = self._require_running_session()
+
+        previous_desired = self._desired_topic
+        self._desired_topic = validated
+        self.switch_started.emit(validated)
+        try:
+            session._set_publisher_topic(self, validated)
+            self.topic_changed.emit(self._topic)
+        except Exception as exc:
+            self._desired_topic = previous_desired
+            self.switch_failed.emit(validated, str(exc))
+            raise
+
+    def clear_topic(self) -> None:
+        """Unpublish from the current topic on a running session."""
+        session = self._require_running_session()
+
+        previous_desired = self._desired_topic
+        self._desired_topic = None
+        self.switch_started.emit(None)
+        try:
+            session._set_publisher_topic(self, None)
+            self.topic_cleared.emit()
+        except Exception as exc:
+            self._desired_topic = previous_desired
+            self.switch_failed.emit(None, str(exc))
+            raise
+
+    def _bind_session(self, session: EzSession) -> None:
+        if self._session is not None and self._session is not session:
+            raise RuntimeError("EzPublisher is already attached to a different session")
+        self._session = session
 
     def _bind_runtime(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
-        maxsize = 0 if self._max_pending is None else self._max_pending
-        self._async_queue = asyncio.Queue(maxsize=maxsize)
+        if self._async_queue is None:
+            maxsize = 0 if self._max_pending is None else self._max_pending
+            self._async_queue = asyncio.Queue(maxsize=maxsize)
 
         with self._pending_lock:
             pending = list(self._pending)
@@ -135,6 +180,24 @@ class EzPublisher(QtCore.QObject):
         if self._async_queue is None:
             raise RuntimeError("Publisher runtime queue is not initialized")
         return await self._async_queue.get()
+
+    def _require_running_session(self) -> EzSession:
+        if self._session is None:
+            raise RuntimeError(
+                "EzPublisher must be attached to a session before switching"
+            )
+        if not self._session.running:
+            raise RuntimeError(
+                "EzPublisher topic switching requires a running EzSession"
+            )
+        return self._session
+
+    @staticmethod
+    def _validate_topic(topic: TopicLike) -> TopicLike:
+        if topic is None:
+            return None
+        normalize_topic(topic)
+        return topic
 
     def _enqueue_pending_locked(self, message: Any) -> None:
         if self._queue_policy == "coalesce_latest":

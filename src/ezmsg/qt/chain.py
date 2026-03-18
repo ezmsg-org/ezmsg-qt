@@ -16,7 +16,7 @@ from qtpy import QtWidgets
 import ezmsg.core as ez
 
 if TYPE_CHECKING:
-    from .bridge import EzGuiBridge
+    from .session import EzSession
 
 # Type alias for processor specifications
 # A processor can be specified as:
@@ -80,7 +80,7 @@ class ProcessorChain:
     Fluent builder for processor chains.
 
     ProcessorChain accumulates processor groups that will be executed
-    in sequence inside a sidecar ezmsg runtime owned by :class:`EzGuiBridge`.
+    in sequence inside a sidecar ezmsg runtime owned by :class:`EzSession`.
 
     - ``parallel()`` runs a group in its own sidecar process.
     - ``local()`` runs a group in the shared sidecar process.
@@ -130,7 +130,7 @@ class ProcessorChain:
         self._groups: list[ProcessorGroup] = []
         self._handler: Callable[[Any], None] | None = None
         self._chain_id: str | None = None
-        self._bridge: EzGuiBridge | None = None
+        self._session: EzSession | None = None
         self._attached = False
 
     @property
@@ -210,29 +210,29 @@ class ProcessorChain:
         return self
 
     @property
-    def bridge(self) -> EzGuiBridge | None:
-        """The bridge this pipeline is attached to, if any."""
-        return self._bridge
+    def session(self) -> EzSession | None:
+        """The session this pipeline is attached to, if any."""
+        return self._session
 
     @property
     def attached(self) -> bool:
-        """Whether this pipeline has been attached to a bridge."""
+        """Whether this pipeline has been attached to a session."""
         return self._attached
 
-    def attach(self, bridge: EzGuiBridge) -> ProcessorChain:
-        """Attach this pipeline to a bridge.
+    def attach(self, session: EzSession) -> ProcessorChain:
+        """Attach this pipeline to a session.
 
         The pipeline must be fully configured before attachment.
         """
-        bridge.attach(self)
+        session.attach(self)
         return self
 
-    def _bind_bridge(self, bridge: EzGuiBridge) -> None:
-        if self._bridge is not None and self._bridge is not bridge:
+    def _bind_session(self, session: EzSession) -> None:
+        if self._session is not None and self._session is not session:
             raise RuntimeError(
-                "ProcessorChain is already attached to a different bridge"
+                "ProcessorChain is already attached to a different session"
             )
-        self._bridge = bridge
+        self._session = session
         self._attached = True
 
     def _validate(self) -> None:

@@ -4,7 +4,7 @@ Simple demo of ezmsg-qt integration.
 This example demonstrates:
 1. A simple ezmsg processing unit that doubles numbers
 2. A Qt widget that publishes numbers and receives results
-3. The EzGuiBridge connecting them together
+3. The EzSession connecting them together
 """
 
 import sys
@@ -20,7 +20,7 @@ from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
 from ezmsg.qt import EzSubscriber
 
@@ -63,7 +63,7 @@ class Doubler(ez.Unit):
 class DemoWidget(QtWidgets.QWidget):
     """Widget that sends numbers and displays doubled results."""
 
-    def __init__(self, bridge: EzGuiBridge, parent=None):
+    def __init__(self, session: EzSession, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ezmsg-qt Demo")
 
@@ -93,8 +93,8 @@ class DemoWidget(QtWidgets.QWidget):
         layout.addWidget(self.log)
 
         # Create ezmsg connections
-        self.number_pub = EzPublisher(DemoTopic.INPUT, parent=self, bridge=bridge)
-        self.result_sub = EzSubscriber(DemoTopic.OUTPUT, parent=self, bridge=bridge)
+        self.number_pub = EzPublisher(DemoTopic.INPUT, parent=self, session=session)
+        self.result_sub = EzSubscriber(DemoTopic.OUTPUT, parent=self, session=session)
 
         # Connect signals
         self.send_btn.clicked.connect(self.on_send)
@@ -148,11 +148,11 @@ def main():
     print("[Main] Starting ezmsg system...")
     runner = GraphRunner(components={"DEMO": DemoSystem()})
     runner.start()
-    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
+    session = EzSession(graph_address=runner.graph_address)
 
     # Create widget and attach Qt endpoints explicitly
     print("[Main] Creating DemoWidget...")
-    widget = DemoWidget(bridge)
+    widget = DemoWidget(session)
     widget.resize(400, 300)
     widget.show()
     print("[Main] Widget shown")
@@ -161,10 +161,10 @@ def main():
     print("[Main] Waiting for ezmsg to start...")
     time.sleep(1.0)
 
-    # Run Qt with ezmsg bridge
-    print("[Main] Starting EzGuiBridge...")
-    with bridge:
-        print("[Main] EzGuiBridge started, scheduling auto-test...")
+    # Run Qt with the ezmsg session
+    print("[Main] Starting EzSession...")
+    with session:
+        print("[Main] EzSession started, scheduling auto-test...")
 
         auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
         if auto_close_ms is not None:

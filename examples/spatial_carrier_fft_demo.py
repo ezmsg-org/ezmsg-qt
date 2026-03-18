@@ -23,7 +23,7 @@ from ezmsg.util.messages.axisarray import AxisArray
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
 from ezmsg.qt import EzSubscriber
 
@@ -299,11 +299,11 @@ def _require_fastplotlib() -> Any:
 class SpatialCarrierWidget(QtWidgets.QWidget):
     def __init__(
         self,
-        bridge: EzGuiBridge,
+        session: EzSession,
         parent: QtWidgets.QWidget | None = None,
     ):
         super().__init__(parent)
-        self._bridge = bridge
+        self._session = session
         self._fpl = _require_fastplotlib()
         self.setWindowTitle("Spatial Carrier FFT Demo")
         self._generator_settings = CarrierGeneratorSettings()
@@ -323,22 +323,22 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
         self._raw_sub = EzSubscriber(
             CarrierTopic.RAW_IMAGE,
             parent=self,
-            bridge=self._bridge,
+            session=self._session,
             leaky=True,
             max_queue=1,
         )
         self._spectrum_sub = EzSubscriber(
             CarrierTopic.FFT_IMAGE,
             parent=self,
-            bridge=self._bridge,
+            session=self._session,
             leaky=True,
             max_queue=1,
         )
         self._generator_settings_pub = EzPublisher(
-            CarrierTopic.GENERATOR_SETTINGS, parent=self, bridge=self._bridge
+            CarrierTopic.GENERATOR_SETTINGS, parent=self, session=self._session
         )
         self._fft_settings_pub = EzPublisher(
-            CarrierTopic.FFT_SETTINGS, parent=self, bridge=self._bridge
+            CarrierTopic.FFT_SETTINGS, parent=self, session=self._session
         )
 
     def _init_controls(self) -> None:
@@ -613,12 +613,12 @@ def main() -> None:
 
     runner = build_runner()
     runner.start()
-    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
-    widget = SpatialCarrierWidget(bridge)
+    session = EzSession(graph_address=runner.graph_address)
+    widget = SpatialCarrierWidget(session)
     widget.resize(1200, 720)
     widget.show()
     try:
-        with bridge:
+        with session:
             app.exec()
     finally:
         if runner.running:

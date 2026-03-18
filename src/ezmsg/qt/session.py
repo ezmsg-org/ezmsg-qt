@@ -1,4 +1,4 @@
-"""EzGuiBridge - explicit runtime ownership for Qt/ezmsg integration."""
+"""EzSession - runtime ownership for Qt/ezmsg integration."""
 
 from __future__ import annotations
 
@@ -44,8 +44,10 @@ class _SubscriberRuntime:
 
 @dataclass
 class _PublisherRuntime:
-    client: Any
-    task: asyncio.Task[None]
+    switch_lock: asyncio.Lock
+    client: Any | None = None
+    task: asyncio.Task[None] | None = None
+    active_topic: str | None = None
 
 
 @dataclass
@@ -72,15 +74,13 @@ class _QtSignalDispatcher(QtCore.QObject):
         self.call_signal.emit(func, args)
 
 
-class EzGuiBridge:
-    """Bridge Qt widgets to ezmsg channels with explicit ownership."""
+class EzSession:
+    """Runtime owner for Qt/ezmsg endpoints and pipelines."""
 
     def __init__(
         self,
-        app: QtWidgets.QApplication,
         graph_address: AddressType | None = None,
     ):
-        self.app = app
         self._context = GraphContext(graph_address)
         self._context_entered = False
         self._thread: threading.Thread | None = None
@@ -89,7 +89,7 @@ class EzGuiBridge:
         self._setup_complete = threading.Event()
         self._setup_error: BaseException | None = None
         self._running = False
-        self._dispatcher = _QtSignalDispatcher(app)
+        self._dispatcher: _QtSignalDispatcher | None = None
         self._tasks: set[asyncio.Task[None]] = set()
 
         self._subscribers: dict[int, EzSubscriber] = {}
@@ -112,11 +112,11 @@ class EzGuiBridge:
 
     @property
     def running(self) -> bool:
-        """Whether the bridge is active and ready to service runtime requests."""
+        """Whether the session is active and ready to service runtime requests."""
         return self._running and self._loop is not None and not self._loop.is_closed()
 
     def attach(self, attachable):
-        """Attach a subscriber, publisher, or processor pipeline to this bridge."""
+        """Attach a subscriber, publisher, or processor pipeline to this session."""
         from .chain import ProcessorChain
         from .publisher import EzPublisher
         from .subscriber import EzSubscriber
@@ -133,7 +133,7 @@ class EzGuiBridge:
         return attachable
 
     def detach(self, attachable) -> None:
-        """Detach a subscriber or publisher from this bridge."""
+        """Detach a subscriber or publisher from this session."""
         from .publisher import EzPublisher
         from .subscriber import EzSubscriber
 
@@ -151,7 +151,7 @@ class EzGuiBridge:
         if key in self._subscribers:
             return
 
-        subscriber._bind_bridge(self)
+        subscriber._bind_session(self)
         self._subscribers[key] = subscriber
         self._bind_destroyed(subscriber, self._detach_subscriber, key)
 
@@ -163,7 +163,7 @@ class EzGuiBridge:
     def _set_subscriber_topic(self, subscriber: EzSubscriber, topic) -> None:
         if not self.running or self._loop is None:
             raise RuntimeError(
-                "EzSubscriber topic switching requires a running EzGuiBridge"
+                "EzSubscriber topic switching requires a running EzSession"
             )
 
         future = asyncio.run_coroutine_threadsafe(
@@ -180,7 +180,7 @@ class EzGuiBridge:
         if key in self._publishers:
             return
 
-        publisher._bind_bridge(self)
+        publisher._bind_session(self)
         self._publishers[key] = publisher
         self._bind_destroyed(publisher, self._detach_publisher, key)
 
@@ -189,17 +189,32 @@ class EzGuiBridge:
                 self._setup_publisher(publisher), self._loop
             ).result()
 
+    def _set_publisher_topic(self, publisher: EzPublisher, topic) -> None:
+        if not self.running or self._loop is None:
+            raise RuntimeError(
+                "EzPublisher topic switching requires a running EzSession"
+            )
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._switch_publisher(publisher, topic), self._loop
+        )
+        try:
+            future.result(timeout=_TOPIC_SWITCH_TIMEOUT)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("Timed out waiting for publisher topic switch") from exc
+
     def _attach_pipeline(self, chain: ProcessorChain) -> None:
         key = id(chain)
         if key in self._pipelines:
             return
         if self._running:
             raise RuntimeError(
-                "Processor pipelines must be attached before bridge start"
+                "Processor pipelines must be attached before session start"
             )
 
         chain._validate()
-        chain._bind_bridge(self)
+        chain._bind_session(self)
         if chain._chain_id is None:
             chain._chain_id = f"chain_{self._chain_counter}"
             self._chain_counter += 1
@@ -231,28 +246,31 @@ class EzGuiBridge:
             return
         try:
             asyncio.run_coroutine_threadsafe(
-                self._close_publisher_runtime(runtime), self._loop
+                self._close_publisher_runtime(runtime, publisher), self._loop
             ).result()
         except RuntimeError:
             logger.debug("Publisher detached after loop shutdown")
 
-    def __enter__(self) -> EzGuiBridge:
+    def __enter__(self) -> EzSession:
         self._running = True
         self._setup_error = None
         self._shutdown.clear()
+        self._setup_complete.clear()
+        if self._dispatcher is None:
+            self._dispatcher = _QtSignalDispatcher(QtWidgets.QApplication.instance())
         self._install_sigint_handler()
 
         self._thread = threading.Thread(
-            target=self._run_async_loop, daemon=True, name="EzGuiBridge"
+            target=self._run_async_loop, daemon=True, name="EzSession"
         )
         self._thread.start()
 
         if not self._setup_complete.wait(timeout=30.0):
-            raise RuntimeError("EzGuiBridge setup timed out")
+            raise RuntimeError("EzSession setup timed out")
         if self._setup_error is not None:
             if self._thread is not None:
                 self._thread.join(timeout=5.0)
-            raise RuntimeError("EzGuiBridge setup failed") from self._setup_error
+            raise RuntimeError("EzSession setup failed") from self._setup_error
 
         return self
 
@@ -286,7 +304,7 @@ class EzGuiBridge:
         try:
             self._loop.run_until_complete(self._async_main())
         except Exception:
-            logger.exception("Error in EzGuiBridge async loop")
+            logger.exception("Error in EzSession async loop")
         finally:
             self._loop.close()
             self._loop = None
@@ -364,7 +382,7 @@ class EzGuiBridge:
         key = id(ez_sub)
         runtime = self._subscriber_runtime.get(key)
         if runtime is None:
-            raise RuntimeError("Subscriber is not initialized on this bridge")
+            raise RuntimeError("Subscriber is not initialized on this session")
 
         desired_topic = None if topic is None else normalize_topic(topic)
 
@@ -403,18 +421,51 @@ class EzGuiBridge:
         if key in self._publisher_runtime:
             return
 
-        topic = normalize_topic(ez_pub.topic)
-        client = await self._context.publisher(topic)
-        ez_pub._pub = client
         if self._loop is None:
-            raise RuntimeError("Bridge loop is not initialized")
+            raise RuntimeError("Session loop is not initialized")
         ez_pub._bind_runtime(self._loop)
-        task = asyncio.create_task(
-            self._publisher_loop(ez_pub, client),
-            name=f"pub-{topic}",
+        runtime = _PublisherRuntime(
+            switch_lock=asyncio.Lock(),
         )
-        self._track_task(task)
-        self._publisher_runtime[key] = _PublisherRuntime(client=client, task=task)
+        self._publisher_runtime[key] = runtime
+
+        if ez_pub._desired_topic is not None:
+            await self._switch_publisher(ez_pub, ez_pub._desired_topic)
+
+    async def _switch_publisher(self, ez_pub: EzPublisher, topic) -> None:
+        key = id(ez_pub)
+        runtime = self._publisher_runtime.get(key)
+        if runtime is None:
+            raise RuntimeError("Publisher is not initialized on this session")
+
+        desired_topic = None if topic is None else normalize_topic(topic)
+
+        async with runtime.switch_lock:
+            if runtime.active_topic == desired_topic:
+                ez_pub._topic = topic
+                ez_pub._desired_topic = topic
+                return
+
+            await self._drain_publisher_queue(ez_pub)
+            await self._close_publisher_client(runtime)
+            ez_pub._pub = None
+
+            try:
+                if desired_topic is not None:
+                    client = await self._context.publisher(desired_topic)
+                    runtime.client = client
+                    ez_pub._pub = client
+                    runtime.task = self._start_publisher_task(ez_pub, runtime)
+            except Exception:
+                runtime.active_topic = None
+                ez_pub._pub = None
+                ez_pub._topic = None
+                raise
+
+            runtime.active_topic = desired_topic
+            ez_pub._pub = runtime.client
+            ez_pub._topic = topic
+            ez_pub._desired_topic = topic
 
     async def _setup_pipeline_runtime(self, compiled: CompiledPipeline) -> None:
         key = id(compiled.chain)
@@ -432,7 +483,7 @@ class EzGuiBridge:
             await gate_publisher.broadcast(
                 GateMessage(open=chain.parent_widget.isVisible())
             )
-            self._dispatcher.schedule(self._setup_auto_gate, chain)
+            self._dispatch(self._setup_auto_gate, chain)
 
         self._pipeline_runtime[key] = _PipelineRuntime(
             compiled=compiled,
@@ -479,7 +530,7 @@ class EzGuiBridge:
             while self._running:
                 epoch = ez_sub._emit_epoch
                 msg = await sub.recv()
-                self._dispatcher.schedule(ez_sub._on_message, msg, epoch)
+                self._dispatch(ez_sub._on_message, msg, epoch)
                 if rate is not None:
                     await rate.sleep()
         except asyncio.CancelledError:
@@ -502,7 +553,7 @@ class EzGuiBridge:
             while self._running:
                 msg = await sub.recv()
                 if compiled.chain.handler is not None:
-                    self._dispatcher.schedule(compiled.chain.handler, msg)
+                    self._dispatch(compiled.chain.handler, msg)
         except asyncio.CancelledError:
             logger.debug("Pipeline loop cancelled for %s", compiled.chain._chain_id)
         except Exception:
@@ -521,6 +572,19 @@ class EzGuiBridge:
         self._track_task(task)
         return task
 
+    def _start_publisher_task(
+        self, ez_pub: EzPublisher, runtime: _PublisherRuntime
+    ) -> asyncio.Task[None]:
+        if runtime.client is None:
+            raise RuntimeError("Publisher client is not initialized")
+
+        task = asyncio.create_task(
+            self._publisher_loop(ez_pub, runtime.client),
+            name=f"pub-{runtime.active_topic or 'dynamic'}",
+        )
+        self._track_task(task)
+        return task
+
     async def _close_subscriber_client(self, runtime: _SubscriberRuntime) -> None:
         if runtime.task is not None:
             runtime.task.cancel()
@@ -534,9 +598,34 @@ class EzGuiBridge:
             await client.wait_closed()
             self._context._clients.discard(client)
 
+    async def _close_publisher_client(self, runtime: _PublisherRuntime) -> None:
+        if runtime.task is not None:
+            runtime.task.cancel()
+            await asyncio.gather(runtime.task, return_exceptions=True)
+            runtime.task = None
+
+        if runtime.client is not None:
+            client = runtime.client
+            runtime.client = None
+            client.close()
+            await client.wait_closed()
+            self._context._clients.discard(client)
+
+    async def _drain_publisher_queue(self, ez_pub: EzPublisher) -> None:
+        if ez_pub._async_queue is None:
+            return
+
+        while not ez_pub._async_queue.empty():
+            await asyncio.sleep(0.01)
+
     def _track_task(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _dispatch(self, func, *args) -> None:
+        if self._dispatcher is None:
+            self._dispatcher = _QtSignalDispatcher(QtWidgets.QApplication.instance())
+        self._dispatcher.schedule(func, *args)
 
     async def _close_subscriber_runtime(
         self, runtime: _SubscriberRuntime, subscriber: EzSubscriber | None = None
@@ -549,11 +638,16 @@ class EzGuiBridge:
             subscriber._topic = None
             subscriber._desired_topic = None
 
-    async def _close_publisher_runtime(self, runtime: _PublisherRuntime) -> None:
-        runtime.task.cancel()
-        await asyncio.gather(runtime.task, return_exceptions=True)
-        runtime.client.close()
-        await runtime.client.wait_closed()
+    async def _close_publisher_runtime(
+        self, runtime: _PublisherRuntime, publisher: EzPublisher | None = None
+    ) -> None:
+        runtime.active_topic = None
+        await self._close_publisher_client(runtime)
+
+        if publisher is not None:
+            publisher._pub = None
+            publisher._topic = None
+            publisher._desired_topic = None
 
     async def _close_pipeline_runtime(self, runtime: _PipelineRuntime) -> None:
         runtime.task.cancel()
@@ -621,10 +715,11 @@ class EzGuiBridge:
             self._wakeup_prev_fd = signal.set_wakeup_fd(sock_w.fileno())
             self._wakeup_sock_r = sock_r
             self._wakeup_sock_w = sock_w
+            app = QtWidgets.QApplication.instance()
             self._sigint_notifier = QtCore.QSocketNotifier(
                 sock_r.fileno(),  # pyright: ignore[reportArgumentType]
                 QtCore.QSocketNotifier.Type.Read,
-                self.app,
+                app,
             )
             self._sigint_notifier.activated.connect(self._on_signal_wakeup)
         except (OSError, RuntimeError, ValueError) as exc:

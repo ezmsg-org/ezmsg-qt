@@ -12,7 +12,7 @@ import pytest
 
 EXAMPLES = [
     "examples/dynamic_topic_switching_demo.py",
-    "examples/ezmsg_toy_bridged.py",
+    "examples/ezmsg_toy_session.py",
     "examples/processor_chain_showcase.py",
     "examples/simple_demo.py",
     "examples/processor_chain_demo.py",

@@ -13,7 +13,7 @@ from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzGuiBridge
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 
 
@@ -57,13 +57,13 @@ class TopicDemoGraph(ez.Collection):
 
     def network(self) -> ez.NetworkDefinition:
         return (
-            (self.ALPHA_SOURCE.OUTPUT, DemoTopic.ALPHA),
-            (self.BETA_SOURCE.OUTPUT, DemoTopic.BETA),
+            (self.ALPHA_SOURCE.OUTPUT, DemoTopic.ALPHA.name),
+            (self.BETA_SOURCE.OUTPUT, DemoTopic.BETA.name),
         )
 
 
 class DynamicTopicWidget(QtWidgets.QWidget):
-    def __init__(self, bridge: EzGuiBridge):
+    def __init__(self, session: EzSession):
         super().__init__()
         self.setWindowTitle("Dynamic Topic Switching Demo")
 
@@ -94,7 +94,7 @@ class DynamicTopicWidget(QtWidgets.QWidget):
         self.log.setMaximumHeight(160)
         layout.addWidget(self.log)
 
-        self.sub = EzSubscriber(DemoTopic.ALPHA, parent=self, bridge=bridge)
+        self.sub = EzSubscriber(DemoTopic.ALPHA, parent=self, session=session)
         self.sub.connect(self.on_message)
         self.topic_combo.currentIndexChanged.connect(self.on_topic_changed)
 
@@ -105,8 +105,9 @@ class DynamicTopicWidget(QtWidgets.QWidget):
         if topic is None:
             return
         self.sub.set_topic(topic)
-        self.current_topic.setText(f"Active topic: {self.sub.topic.name}")
-        self._log(f"Switched to {self.sub.topic.name}")
+        topic_name = topic.name if isinstance(topic, DemoTopic) else str(topic)
+        self.current_topic.setText(f"Active topic: {topic_name}")
+        self._log(f"Switched to {topic_name}")
 
     def on_message(self, msg: str) -> None:
         self.message_label.setText(msg)
@@ -122,15 +123,15 @@ def main() -> None:
     runner = GraphRunner(components={"demo": TopicDemoGraph()})
     runner.start()
 
-    bridge = EzGuiBridge(app, graph_address=runner.graph_address)
-    widget = DynamicTopicWidget(bridge)
+    session = EzSession(graph_address=runner.graph_address)
+    widget = DynamicTopicWidget(session)
     widget.resize(520, 320)
     widget.show()
 
     auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
 
     try:
-        with bridge:
+        with session:
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(
                     500, lambda: widget.topic_combo.setCurrentIndex(1)
