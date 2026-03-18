@@ -46,8 +46,6 @@ def _run_chain(qtbot, chain_builder, expected: list[float]) -> list[float]:
     pub = EzPublisher(DemoTopic.INPUT, parent=widget, session=session)
     chain_builder(widget, session, results)
 
-    widget.show()
-
     with session:
         qtbot.wait(250)
         for value in [5.0, 10.0]:
@@ -64,7 +62,9 @@ def test_local_chain_integration(qtbot):
 
     results = _run_chain(
         qtbot,
-        lambda widget, session, results: ProcessorChain(DemoTopic.INPUT, parent=widget)
+        lambda widget, session, results: ProcessorChain(
+            DemoTopic.INPUT, parent=widget, auto_gate=False
+        )
         .local(AddOneProcessor)
         .connect(results.append)
         .attach(session),
@@ -80,7 +80,9 @@ def test_parallel_chain_integration(qtbot):
 
     results = _run_chain(
         qtbot,
-        lambda widget, session, results: ProcessorChain(DemoTopic.INPUT, parent=widget)
+        lambda widget, session, results: ProcessorChain(
+            DemoTopic.INPUT, parent=widget, auto_gate=False
+        )
         .parallel(DoubleProcessor)
         .connect(results.append)
         .attach(session),
@@ -96,7 +98,9 @@ def test_mixed_chain_integration(qtbot):
 
     results = _run_chain(
         qtbot,
-        lambda widget, session, results: ProcessorChain(DemoTopic.INPUT, parent=widget)
+        lambda widget, session, results: ProcessorChain(
+            DemoTopic.INPUT, parent=widget, auto_gate=False
+        )
         .parallel(DoubleProcessor)
         .local(AddOneProcessor)
         .connect(results.append)
