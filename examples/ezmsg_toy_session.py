@@ -296,16 +296,11 @@ class SessionWindow(QtWidgets.QWidget):
 
 
 def main():
-    print("[Main] Starting...")
-
-    # Create Qt app
-    print("[Main] Creating QApplication...")
     app = QtWidgets.QApplication(sys.argv)
 
     # Create the message receiver unit
     qt_receiver = QtMessageReceiver()
 
-    print("[Main] Starting GraphRunner...")
     system = TestSystem(TestSystemSettings(name="Session"))
     runner = GraphRunner(
         components={
@@ -326,8 +321,6 @@ def main():
     runner.start()
     session = EzSession(graph_address=runner.graph_address)
 
-    # Create widget and attach Qt endpoints explicitly
-    print("[Main] Creating SessionWindow...")
     window = SessionWindow(session)
     window.resize(500, 450)
     window.show()
@@ -337,9 +330,7 @@ def main():
             auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
-            print("[Main] Session active, entering Qt event loop...")
             app.exec()
-            print("[Main] Qt event loop exited")
             app.quit()
     finally:
         if runner.running:

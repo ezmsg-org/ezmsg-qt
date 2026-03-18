@@ -24,9 +24,10 @@ class DoubleProcessor(ez.Unit):
 
 def test_build_sidecar_components_empty():
     """Empty chain list produces no components."""
-    components, connections, compiled = build_sidecar_components([])
+    components, connections, process_components, compiled = build_sidecar_components([])
     assert components == {}
     assert connections == []
+    assert process_components == ()
     assert compiled == []
 
 
@@ -38,10 +39,14 @@ def test_build_sidecar_components_single_parallel_group():
     chain._chain_id = "test_chain"
     chain.parallel(DoubleProcessor).connect(lambda _msg: None)
 
-    components, connections, compiled = build_sidecar_components([chain])
+    components, connections, process_components, compiled = build_sidecar_components(
+        [chain]
+    )
 
-    assert "pipeline_test_chain" in components
+    assert "test_chain_gate" in components
+    assert "test_chain_group_0" in components
     assert len(connections) > 0
+    assert process_components == (components["test_chain_group_0"],)
     assert compiled[0].output_topic == "_qt.test_chain.out"
 
 
@@ -53,12 +58,14 @@ def test_build_sidecar_components_multiple_processors_in_group():
     chain._chain_id = "test_chain"
     chain.parallel(DoubleProcessor, DoubleProcessor).connect(lambda _msg: None)
 
-    components, connections, _compiled = build_sidecar_components([chain])
+    components, connections, process_components, _compiled = build_sidecar_components(
+        [chain]
+    )
 
-    pipeline = components["pipeline_test_chain"]
-    group = getattr(pipeline, "group_0")
+    group = components["test_chain_group_0"]
     assert hasattr(group, "proc_0")
     assert hasattr(group, "proc_1")
+    assert process_components == (group,)
 
 
 def test_build_sidecar_components_ignores_local_groups():
@@ -69,10 +76,14 @@ def test_build_sidecar_components_ignores_local_groups():
     chain._chain_id = "test_chain"
     chain.local(DoubleProcessor).connect(lambda _msg: None)
 
-    components, connections, compiled = build_sidecar_components([chain])
+    components, connections, process_components, compiled = build_sidecar_components(
+        [chain]
+    )
 
-    assert "pipeline_test_chain" in components
+    assert "test_chain_gate" in components
+    assert "test_chain_group_0" in components
     assert connections
+    assert process_components == ()
     assert compiled
 
 
@@ -84,11 +95,27 @@ def test_build_sidecar_components_mixed_groups():
     chain._chain_id = "test_chain"
     chain.parallel(DoubleProcessor).local(DoubleProcessor).connect(lambda _msg: None)
 
-    components, connections, _compiled = build_sidecar_components([chain])
+    components, connections, process_components, _compiled = build_sidecar_components(
+        [chain]
+    )
 
-    pipeline = components["pipeline_test_chain"]
-    group_0 = getattr(pipeline, "group_0")
-    group_1 = getattr(pipeline, "group_1")
-    process_components = pipeline.process_components()
+    group_0 = components["test_chain_group_0"]
+    group_1 = components["test_chain_group_1"]
     assert group_0 in process_components
     assert group_1 not in process_components
+
+
+def test_build_sidecar_components_uses_topic_prefix():
+    """Compiled topics can be namespaced per session."""
+    from ezmsg.qt.chain import ProcessorChain
+
+    chain = ProcessorChain(DemoTopic.INPUT, parent=None)
+    chain._chain_id = "test_chain"
+    chain.local(DoubleProcessor).connect(lambda _msg: None)
+
+    _components, _connections, _process_components, compiled = build_sidecar_components(
+        [chain], topic_prefix="_qt.session_123"
+    )
+
+    assert compiled[0].gate_topic == "_qt.session_123.test_chain.gate"
+    assert compiled[0].output_topic == "_qt.session_123.test_chain.out"

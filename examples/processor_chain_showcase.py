@@ -266,20 +266,11 @@ def main():
             auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
-            print("[Main] Session active, starting Qt event loop...", flush=True)
             app.exec()
-            print("[Main] Qt event loop exited, calling app.quit()...", flush=True)
             app.quit()
-        print("[Main] Session context exited", flush=True)
     finally:
-        print("[Main] Finally block...", flush=True)
         if runner.running:
-            print("[Main] Stopping runner...", flush=True)
             runner.stop()
-            print("[Main] Runner stopped", flush=True)
-        else:
-            print("[Main] Runner already stopped", flush=True)
-    print("[Main] main() complete", flush=True)
 
 
 if __name__ == "__main__":

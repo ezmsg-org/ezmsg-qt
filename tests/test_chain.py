@@ -44,6 +44,11 @@ class ConfigurableDouble(ez.Unit):
         yield self.OUTPUT, msg * self.SETTINGS.factor
 
 
+class AsyncTransformer:
+    async def __acall__(self, msg: float) -> float:
+        return msg * 2
+
+
 def test_processor_chain_creation():
     """ProcessorChain can be created with source topic."""
     chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
@@ -132,3 +137,18 @@ def test_processor_chain_connect():
     result = chain.connect(handler)
     assert result is chain
     assert chain.handler is handler
+
+
+def test_processor_chain_parallel_rejects_transformer_instances():
+    """parallel() only accepts process-safe ez.Unit-based processors."""
+    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
+    chain.parallel(AsyncTransformer()).connect(lambda _msg: None)
+
+    try:
+        chain._validate()
+    except TypeError as exc:
+        assert "parallel() only supports" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected ProcessorChain._validate() to reject transformer"
+        )

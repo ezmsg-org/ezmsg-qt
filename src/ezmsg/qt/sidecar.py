@@ -88,52 +88,8 @@ class ProcessorGroupCollection(ez.Collection):
         edges.append((previous, self.OUTPUT))
         return edges
 
-
-class PipelineCollection(ez.Collection):
-    """Collection wrapper for one compiled processor pipeline."""
-
-    INPUT = ez.InputStream(Any)
-    OUTPUT = ez.OutputStream(Any)
-    INPUT_GATE = ez.InputStream(GateMessage)
-
-    def __init__(self, groups: list[ProcessorGroup]):
-        super().__init__()
-        self._group_collections: list[tuple[str, ProcessorGroupCollection, str]] = []
-
-        gate = MessageGate(MessageGateSettings(start_open=True))
-        gate._set_name("gate")
-        self._gate = gate
-        self._components["gate"] = gate
-        setattr(self, "gate", gate)
-
-        for index, group in enumerate(groups):
-            collection = ProcessorGroupCollection(group.processors)
-            name = f"group_{index}"
-            collection._set_name(name)
-            self._components[name] = collection
-            setattr(self, name, collection)
-            self._group_collections.append((name, collection, group.mode))
-
-    def network(self) -> NetworkDefinition:
-        edges: list[tuple[Any, Any]] = [
-            (self.INPUT, self._gate.INPUT),
-            (self.INPUT_GATE, self._gate.INPUT_GATE),
-        ]
-        previous: Any = self._gate.OUTPUT
-
-        for _name, collection, _mode in self._group_collections:
-            edges.append((previous, collection.INPUT))
-            previous = collection.OUTPUT
-
-        edges.append((previous, self.OUTPUT))
-        return edges
-
     def process_components(self) -> tuple[ez.Component, ...]:
-        return tuple(
-            collection
-            for _name, collection, mode in self._group_collections
-            if mode == "process"
-        )
+        return ()
 
 
 @dataclass(frozen=True)
@@ -141,49 +97,71 @@ class CompiledPipeline:
     """Session-facing metadata for a compiled pipeline."""
 
     chain: ProcessorChain
-    component_name: str
+    gate_component_name: str
+    group_component_names: tuple[str, ...]
     source_topic: str
     output_topic: str
     gate_topic: str
-    component: PipelineCollection
 
 
 def build_sidecar_components(
     chains: list[ProcessorChain],
+    topic_prefix: str = "_qt",
 ) -> tuple[
-    dict[str, PipelineCollection], list[tuple[Any, Any]], list[CompiledPipeline]
+    dict[str, ez.Component],
+    list[tuple[Any, Any]],
+    tuple[ez.Component, ...],
+    list[CompiledPipeline],
 ]:
     """Compile pipelines into a sidecar GraphRunner definition."""
-    components: dict[str, PipelineCollection] = {}
+    components: dict[str, ez.Component] = {}
     connections: list[tuple[Any, Any]] = []
+    process_components: list[ez.Component] = []
     compiled: list[CompiledPipeline] = []
 
     for index, chain in enumerate(chains):
         chain._validate()
         chain_id = chain._chain_id or f"chain_{index}"
-        component_name = f"pipeline_{chain_id}"
-        output_topic = f"_qt.{chain_id}.out"
-        gate_topic = f"_qt.{chain_id}.gate"
+        gate_name = f"{chain_id}_gate"
+        output_topic = f"{topic_prefix}.{chain_id}.out"
+        gate_topic = f"{topic_prefix}.{chain_id}.gate"
         source_topic = normalize_topic(chain.source_topic)
 
-        component = PipelineCollection(chain.groups)
-        components[component_name] = component
+        gate = MessageGate(MessageGateSettings(start_open=True))
+        components[gate_name] = gate
+
         connections.extend(
             [
-                (source_topic, component.INPUT),
-                (gate_topic, component.INPUT_GATE),
-                (component.OUTPUT, output_topic),
+                (source_topic, f"{gate_name}/INPUT"),
+                (gate_topic, f"{gate_name}/INPUT_GATE"),
             ]
         )
+
+        previous: Any = f"{gate_name}/OUTPUT"
+        group_names: list[str] = []
+
+        for group_index, group in enumerate(chain.groups):
+            group_name = f"{chain_id}_group_{group_index}"
+            collection = ProcessorGroupCollection(group.processors)
+            components[group_name] = collection
+            connections.append((previous, f"{group_name}/INPUT"))
+            previous = f"{group_name}/OUTPUT"
+            group_names.append(group_name)
+
+            if group.mode == "process":
+                process_components.append(collection)
+
+        connections.append((previous, output_topic))
+
         compiled.append(
             CompiledPipeline(
                 chain=chain,
-                component_name=component_name,
+                gate_component_name=gate_name,
+                group_component_names=tuple(group_names),
                 source_topic=source_topic,
                 output_topic=output_topic,
                 gate_topic=gate_topic,
-                component=component,
             )
         )
 
-    return components, connections, compiled
+    return components, connections, tuple(process_components), compiled

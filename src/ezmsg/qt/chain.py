@@ -30,6 +30,15 @@ ProcessorSpec = Union[
 ]
 
 
+def _is_process_safe(spec: ProcessorSpec) -> bool:
+    if isinstance(spec, ez.Unit):
+        return True
+    if isinstance(spec, tuple):
+        unit_class, _settings = spec
+        return isinstance(unit_class, type) and issubclass(unit_class, ez.Unit)
+    return isinstance(spec, type) and issubclass(spec, ez.Unit)
+
+
 def _to_unit(spec: ProcessorSpec) -> ez.Unit:
     """Convert a ProcessorSpec to an ez.Unit instance.
 
@@ -166,7 +175,7 @@ class ProcessorChain:
 
         Args:
             *processors: Unit classes, (class, settings) tuples, or
-                transformer instances.
+                ez.Unit instances.
 
         Returns:
             Self for method chaining.
@@ -174,6 +183,10 @@ class ProcessorChain:
         Example:
             chain.parallel(LowPassFilter, ScaleProcessor)  # same process
             chain.parallel(FFT)  # different process
+
+        Note:
+            ``parallel()`` only supports ez.Unit-based processors. Transformer
+            instances with ``__acall__`` are only supported by ``local()``.
         """
         self._groups.append(ProcessorGroup(processors=list(processors), mode="process"))
         return self
@@ -240,3 +253,12 @@ class ProcessorChain:
             raise ValueError("ProcessorChain must define at least one processor group")
         if self._handler is None:
             raise ValueError("ProcessorChain must connect a handler before attachment")
+        for group in self._groups:
+            if group.mode != "process":
+                continue
+            for spec in group.processors:
+                if not _is_process_safe(spec):
+                    raise TypeError(
+                        "parallel() only supports ez.Unit classes, ez.Unit instances, "
+                        "or (UnitClass, Settings) tuples"
+                    )

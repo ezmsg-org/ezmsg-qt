@@ -97,7 +97,7 @@ def test_switch_suppresses_queued_stale_messages(qtbot):
     assert "stale" not in received
 
 
-def test_switch_does_not_leak_subscriber_clients(qtbot):
+def test_switch_reuses_single_subscriber_runtime(qtbot):
     session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
@@ -105,12 +105,14 @@ def test_switch_does_not_leak_subscriber_clients(qtbot):
     sub = EzSubscriber(DemoTopic.A, parent=widget, session=session)
 
     with session:
-        initial_clients = len(session._context._clients)
+        assert len(session._subscriber_runtime) == 1
+        runtime = session._subscriber_runtime[id(sub)]
 
         sub.set_topic(DemoTopic.B)
         sub.set_topic(DemoTopic.C)
 
-        assert len(session._context._clients) == initial_clients
+        assert len(session._subscriber_runtime) == 1
+        assert session._subscriber_runtime[id(sub)] is runtime
 
 
 def test_attach_after_start_supports_switching(qtbot):

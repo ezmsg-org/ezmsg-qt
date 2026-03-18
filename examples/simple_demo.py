@@ -139,54 +139,33 @@ class DemoSystem(ez.Collection):
 
 # --- Main ---
 def main():
-    print("[Main] Starting...")
-
-    # Create Qt app
-    print("[Main] Creating QApplication...")
     app = QtWidgets.QApplication(sys.argv)
 
-    print("[Main] Starting ezmsg system...")
     runner = GraphRunner(components={"DEMO": DemoSystem()})
     runner.start()
     session = EzSession(graph_address=runner.graph_address)
 
-    # Create widget and attach Qt endpoints explicitly
-    print("[Main] Creating DemoWidget...")
     widget = DemoWidget(session)
     widget.resize(400, 300)
     widget.show()
-    print("[Main] Widget shown")
 
-    # Give ezmsg time to connect
-    print("[Main] Waiting for ezmsg to start...")
     time.sleep(1.0)
 
-    # Run Qt with the ezmsg session
-    print("[Main] Starting EzSession...")
     with session:
-        print("[Main] EzSession started, scheduling auto-test...")
-
         auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
         if auto_close_ms is not None:
             QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
 
         # Auto-send a test message after a short delay
         def auto_test():
-            print("[Test] Sending test message: 42")
             widget.spin.setValue(42)
             widget.on_send()
 
         QtCore.QTimer.singleShot(2000, auto_test)  # Send after 2 seconds
-
-        print("[Main] Entering Qt event loop...")
         app.exec()
-        print("[Main] Qt event loop exited")
 
-    # Cleanup
-    print("[Main] Stopping runner...")
     if runner.running:
         runner.stop()
-    print("[Main] Done")
 
 
 if __name__ == "__main__":

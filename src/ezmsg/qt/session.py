@@ -16,6 +16,8 @@ import weakref
 from ezmsg.core.backend import GraphRunner
 from ezmsg.core.graphcontext import GraphContext
 from ezmsg.core.netprotocol import AddressType
+from ezmsg.core.pubclient import Publisher as EzPublisherClient
+from ezmsg.core.subclient import Subscriber as EzSubscriberClient
 from qtpy import QtCore
 from qtpy import QtWidgets
 
@@ -82,7 +84,8 @@ class EzSession:
         self,
         graph_address: AddressType | None = None,
     ):
-        self._context = GraphContext(graph_address)
+        self._graph_address = graph_address
+        self._context: GraphContext | None = None
         self._context_entered = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -104,6 +107,7 @@ class EzSession:
         self._compiled_pipelines: list[CompiledPipeline] = []
         self._sidecar: GraphRunner | None = None
         self._chain_counter = 0
+        self._topic_prefix = f"_qt.{id(self):x}"
 
         self._prev_sigint_handler = None
         self._sigint_notifier: QtCore.QSocketNotifier | None = None
@@ -115,6 +119,14 @@ class EzSession:
     def running(self) -> bool:
         """Whether the session is active and ready to service runtime requests."""
         return self._running and self._loop is not None and not self._loop.is_closed()
+
+    @property
+    def graph_address(self) -> AddressType | None:
+        if self._context is not None:
+            return self._context.graph_address
+        if self._sidecar is not None and self._sidecar.graph_address is not None:
+            return self._sidecar.graph_address
+        return self._graph_address
 
     def attach(self, attachable):
         """Attach a subscriber, publisher, or processor pipeline to this session."""
@@ -271,6 +283,9 @@ class EzSession:
             self._dispatcher = _QtSignalDispatcher(QtWidgets.QApplication.instance())
         self._install_sigint_handler()
 
+        self._prepare_sidecar()
+        self._context = GraphContext(self._graph_address)
+
         self._thread = threading.Thread(
             target=self._run_async_loop, daemon=True, name="EzSession"
         )
@@ -323,6 +338,9 @@ class EzSession:
             self._loop = None
 
     async def _async_main(self) -> None:
+        if self._context is None:
+            raise RuntimeError("Session graph context is not initialized")
+
         try:
             try:
                 await self._context.__aenter__()
@@ -343,8 +361,6 @@ class EzSession:
             raise self._setup_error
 
     async def _async_setup(self) -> None:
-        await self._setup_sidecar()
-
         for subscriber in list(self._subscribers.values()):
             await self._setup_subscriber(subscriber)
 
@@ -354,29 +370,31 @@ class EzSession:
         for compiled in self._compiled_pipelines:
             await self._setup_pipeline_runtime(compiled)
 
-    async def _setup_sidecar(self) -> None:
+    def _prepare_sidecar(self) -> None:
+        """Start the sidecar runner before entering the session graph context.
+
+        This lets the session reuse the sidecar-owned graph address when it needs
+        to spawn a new graph server for compiled processor chains.
+        """
         pipelines = list(self._pipelines.values())
         if not pipelines:
             self._compiled_pipelines = []
             return
 
-        components, connections, compiled_pipelines = build_sidecar_components(
-            pipelines
+        components, connections, process_components, compiled_pipelines = (
+            build_sidecar_components(pipelines, topic_prefix=self._topic_prefix)
         )
         runner = GraphRunner(
             components=components,
             connections=connections,
-            process_components=tuple(
-                pipeline.component
-                for pipeline in compiled_pipelines
-                if pipeline.component.process_components()
-            ),
-            graph_address=self._context.graph_address,
+            process_components=process_components,
+            graph_address=self._graph_address,
         )
-        await asyncio.to_thread(runner.start)
-        await self._context.sync(timeout=5.0)
+        runner.start()
         self._sidecar = runner
         self._compiled_pipelines = compiled_pipelines
+        if self._graph_address is None and runner.graph_address is not None:
+            self._graph_address = runner.graph_address
 
     @staticmethod
     def _subscriber_client_kwargs(ez_sub: EzSubscriber) -> dict[str, object]:
@@ -386,6 +404,22 @@ class EzSession:
             if ez_sub.max_queue is not None:
                 sub_kwargs["max_queue"] = ez_sub.max_queue
         return sub_kwargs
+
+    def _require_graph_address(self) -> AddressType:
+        address = self.graph_address
+        if address is None:
+            raise RuntimeError("Session graph address is not available")
+        return address
+
+    async def _create_subscriber_client(self, topic: str, **kwargs) -> Any:
+        return await EzSubscriberClient.create(
+            topic, self._require_graph_address(), **kwargs
+        )
+
+    async def _create_publisher_client(self, topic: str, **kwargs) -> Any:
+        return await EzPublisherClient.create(
+            topic, self._require_graph_address(), **kwargs
+        )
 
     async def _setup_subscriber(self, ez_sub: EzSubscriber) -> None:
         key = id(ez_sub)
@@ -419,7 +453,7 @@ class EzSession:
 
             try:
                 if desired_topic is not None:
-                    client = await self._context.subscriber(
+                    client = await self._create_subscriber_client(
                         desired_topic, **self._subscriber_client_kwargs(ez_sub)
                     )
                     runtime.client = client
@@ -473,7 +507,7 @@ class EzSession:
 
             try:
                 if desired_topic is not None:
-                    client = await self._context.publisher(desired_topic)
+                    client = await self._create_publisher_client(desired_topic)
                     runtime.client = client
                     ez_pub._pub = client
                     runtime.task = self._start_publisher_task(ez_pub, runtime)
@@ -490,7 +524,7 @@ class EzSession:
 
     async def _setup_pipeline_runtime(self, compiled: CompiledPipeline) -> None:
         key = id(compiled.chain)
-        client = await self._context.subscriber(compiled.output_topic)
+        client = await self._create_subscriber_client(compiled.output_topic)
         task = asyncio.create_task(
             self._pipeline_output_loop(compiled, client),
             name=f"pipeline-{compiled.chain._chain_id}",
@@ -500,7 +534,7 @@ class EzSession:
         gate_publisher = None
         chain = compiled.chain
         if chain.auto_gate and chain.parent_widget is not None:
-            gate_publisher = await self._context.publisher(compiled.gate_topic)
+            gate_publisher = await self._create_publisher_client(compiled.gate_topic)
             await gate_publisher.broadcast(
                 GateMessage(open=chain.parent_widget.isVisible())
             )
@@ -617,7 +651,6 @@ class EzSession:
             runtime.client = None
             client.close()
             await client.wait_closed()
-            self._context._clients.discard(client)
 
     async def _close_publisher_client(self, runtime: _PublisherRuntime) -> None:
         if runtime.task is not None:
@@ -630,7 +663,6 @@ class EzSession:
             runtime.client = None
             client.close()
             await client.wait_closed()
-            self._context._clients.discard(client)
 
     async def _drain_publisher_queue(self, ez_pub: EzPublisher) -> None:
         if ez_pub._async_queue is None:
@@ -728,7 +760,7 @@ class EzSession:
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
 
-        if self._context_entered:
+        if self._context_entered and self._context is not None:
             await self._context.__aexit__(None, None, None)
             self._context_entered = False
 

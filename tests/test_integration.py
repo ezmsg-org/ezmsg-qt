@@ -1,6 +1,5 @@
 """Integration tests for processor chains."""
 
-import pytest
 from enum import Enum
 from typing import AsyncGenerator
 
@@ -9,7 +8,6 @@ import ezmsg.core as ez
 
 class DemoTopic(Enum):
     INPUT = "INPUT"
-    OUTPUT = "OUTPUT"
 
 
 class DoubleProcessor(ez.Unit):
@@ -32,37 +30,79 @@ class AddOneProcessor(ez.Unit):
         yield self.OUTPUT, msg + 1
 
 
-@pytest.mark.skip(reason="Requires running GraphServer - manual test")
-def test_full_chain_integration(qtbot):
-    """Full integration test with sidecar processing."""
+def _run_chain(qtbot, chain_builder, expected: list[float]) -> list[float]:
     from qtpy import QtWidgets
-    from ezmsg.qt import EzSession, EzPublisher, ProcessorChain
+
+    from ezmsg.qt import EzPublisher
+    from ezmsg.qt import EzSession
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     session = EzSession()
 
-    results = []
-
-    # Create widgets
+    results: list[float] = []
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
     pub = EzPublisher(DemoTopic.INPUT, parent=widget, session=session)
-
-    # Chain: double (isolated sidecar process) -> add one (shared sidecar process)
-    ProcessorChain(DemoTopic.INPUT, parent=widget).parallel(DoubleProcessor).local(
-        AddOneProcessor
-    ).connect(results.append).attach(session)
+    chain_builder(widget, session, results)
 
     widget.show()
 
     with session:
-        # Publish test values
-        pub.emit(5.0)  # Expected: (5 * 2) + 1 = 11
-        pub.emit(10.0)  # Expected: (10 * 2) + 1 = 21
+        qtbot.wait(250)
+        for value in [5.0, 10.0]:
+            pub.emit(value)
+        qtbot.waitUntil(
+            lambda: all(result in results for result in expected), timeout=2000
+        )
 
-        # Process events
-        qtbot.wait(1000)
+    return results
+
+
+def test_local_chain_integration(qtbot):
+    from ezmsg.qt import ProcessorChain
+
+    results = _run_chain(
+        qtbot,
+        lambda widget, session, results: ProcessorChain(DemoTopic.INPUT, parent=widget)
+        .local(AddOneProcessor)
+        .connect(results.append)
+        .attach(session),
+        [6.0, 11.0],
+    )
+
+    assert 6.0 in results
+    assert 11.0 in results
+
+
+def test_parallel_chain_integration(qtbot):
+    from ezmsg.qt import ProcessorChain
+
+    results = _run_chain(
+        qtbot,
+        lambda widget, session, results: ProcessorChain(DemoTopic.INPUT, parent=widget)
+        .parallel(DoubleProcessor)
+        .connect(results.append)
+        .attach(session),
+        [10.0, 20.0],
+    )
+
+    assert 10.0 in results
+    assert 20.0 in results
+
+
+def test_mixed_chain_integration(qtbot):
+    from ezmsg.qt import ProcessorChain
+
+    results = _run_chain(
+        qtbot,
+        lambda widget, session, results: ProcessorChain(DemoTopic.INPUT, parent=widget)
+        .parallel(DoubleProcessor)
+        .local(AddOneProcessor)
+        .connect(results.append)
+        .attach(session),
+        [11.0, 21.0],
+    )
 
     assert 11.0 in results
     assert 21.0 in results
