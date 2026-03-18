@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TOPIC_SWITCH_TIMEOUT = 5.0
+_RUNTIME_OPERATION_TIMEOUT = 5.0
 
 
 @dataclass
@@ -156,9 +157,12 @@ class EzSession:
         self._bind_destroyed(subscriber, self._detach_subscriber, key)
 
         if self._running and self._loop is not None:
-            asyncio.run_coroutine_threadsafe(
-                self._setup_subscriber(subscriber), self._loop
-            ).result()
+            self._wait_for_runtime_operation(
+                asyncio.run_coroutine_threadsafe(
+                    self._setup_subscriber(subscriber), self._loop
+                ),
+                "subscriber attach",
+            )
 
     def _set_subscriber_topic(self, subscriber: EzSubscriber, topic) -> None:
         if not self.running or self._loop is None:
@@ -166,14 +170,13 @@ class EzSession:
                 "EzSubscriber topic switching requires a running EzSession"
             )
 
-        future = asyncio.run_coroutine_threadsafe(
-            self._switch_subscriber(subscriber, topic), self._loop
+        self._wait_for_runtime_operation(
+            asyncio.run_coroutine_threadsafe(
+                self._switch_subscriber(subscriber, topic), self._loop
+            ),
+            "subscriber topic switch",
+            timeout=_TOPIC_SWITCH_TIMEOUT,
         )
-        try:
-            future.result(timeout=_TOPIC_SWITCH_TIMEOUT)
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise TimeoutError("Timed out waiting for subscriber topic switch") from exc
 
     def _attach_publisher(self, publisher: EzPublisher) -> None:
         key = id(publisher)
@@ -185,9 +188,12 @@ class EzSession:
         self._bind_destroyed(publisher, self._detach_publisher, key)
 
         if self._running and self._loop is not None:
-            asyncio.run_coroutine_threadsafe(
-                self._setup_publisher(publisher), self._loop
-            ).result()
+            self._wait_for_runtime_operation(
+                asyncio.run_coroutine_threadsafe(
+                    self._setup_publisher(publisher), self._loop
+                ),
+                "publisher attach",
+            )
 
     def _set_publisher_topic(self, publisher: EzPublisher, topic) -> None:
         if not self.running or self._loop is None:
@@ -195,14 +201,13 @@ class EzSession:
                 "EzPublisher topic switching requires a running EzSession"
             )
 
-        future = asyncio.run_coroutine_threadsafe(
-            self._switch_publisher(publisher, topic), self._loop
+        self._wait_for_runtime_operation(
+            asyncio.run_coroutine_threadsafe(
+                self._switch_publisher(publisher, topic), self._loop
+            ),
+            "publisher topic switch",
+            timeout=_TOPIC_SWITCH_TIMEOUT,
         )
-        try:
-            future.result(timeout=_TOPIC_SWITCH_TIMEOUT)
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise TimeoutError("Timed out waiting for publisher topic switch") from exc
 
     def _attach_pipeline(self, chain: ProcessorChain) -> None:
         key = id(chain)
@@ -231,9 +236,12 @@ class EzSession:
         if runtime is None or self._loop is None or self._loop.is_closed():
             return
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._close_subscriber_runtime(runtime, subscriber), self._loop
-            ).result()
+            self._wait_for_runtime_operation(
+                asyncio.run_coroutine_threadsafe(
+                    self._close_subscriber_runtime(runtime, subscriber), self._loop
+                ),
+                "subscriber detach",
+            )
         except RuntimeError:
             logger.debug("Subscriber detached after loop shutdown")
 
@@ -245,9 +253,12 @@ class EzSession:
         if runtime is None or self._loop is None or self._loop.is_closed():
             return
         try:
-            asyncio.run_coroutine_threadsafe(
-                self._close_publisher_runtime(runtime, publisher), self._loop
-            ).result()
+            self._wait_for_runtime_operation(
+                asyncio.run_coroutine_threadsafe(
+                    self._close_publisher_runtime(runtime, publisher), self._loop
+                ),
+                "publisher detach",
+            )
         except RuntimeError:
             logger.debug("Publisher detached after loop shutdown")
 
@@ -265,12 +276,14 @@ class EzSession:
         )
         self._thread.start()
 
-        if not self._setup_complete.wait(timeout=30.0):
-            raise RuntimeError("EzSession setup timed out")
-        if self._setup_error is not None:
-            if self._thread is not None:
-                self._thread.join(timeout=5.0)
-            raise RuntimeError("EzSession setup failed") from self._setup_error
+        try:
+            if not self._setup_complete.wait(timeout=30.0):
+                raise RuntimeError("EzSession setup timed out")
+            if self._setup_error is not None:
+                raise RuntimeError("EzSession setup failed") from self._setup_error
+        except Exception:
+            self._abort_startup()
+            raise
 
         return self
 
@@ -347,16 +360,23 @@ class EzSession:
             self._compiled_pipelines = []
             return
 
-        components, connections, compiled = build_sidecar_components(pipelines)
+        components, connections, compiled_pipelines = build_sidecar_components(
+            pipelines
+        )
         runner = GraphRunner(
             components=components,
             connections=connections,
+            process_components=tuple(
+                pipeline.component
+                for pipeline in compiled_pipelines
+                if pipeline.component.process_components()
+            ),
             graph_address=self._context.graph_address,
         )
         await asyncio.to_thread(runner.start)
         await self._context.sync(timeout=5.0)
         self._sidecar = runner
-        self._compiled_pipelines = compiled
+        self._compiled_pipelines = compiled_pipelines
 
     @staticmethod
     def _subscriber_client_kwargs(ez_sub: EzSubscriber) -> dict[str, object]:
@@ -431,6 +451,7 @@ class EzSession:
 
         if ez_pub._desired_topic is not None:
             await self._switch_publisher(ez_pub, ez_pub._desired_topic)
+            await ez_pub._flush_pending()
 
     async def _switch_publisher(self, ez_pub: EzPublisher, topic) -> None:
         key = id(ez_pub)
@@ -621,6 +642,36 @@ class EzSession:
     def _track_task(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    @staticmethod
+    def _wait_for_runtime_operation(
+        future, operation: str, timeout: float = _RUNTIME_OPERATION_TIMEOUT
+    ) -> None:
+        try:
+            future.result(timeout=timeout)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"Timed out waiting for {operation}") from exc
+
+    def _abort_startup(self) -> None:
+        self._running = False
+        self._shutdown.set()
+
+        if self._sidecar is not None:
+            try:
+                self._sidecar.stop()
+            except Exception:
+                logger.debug(
+                    "Error stopping sidecar during startup abort", exc_info=True
+                )
+            finally:
+                self._sidecar = None
+
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+        self._restore_sigint_handler()
 
     def _dispatch(self, func, *args) -> None:
         if self._dispatcher is None:

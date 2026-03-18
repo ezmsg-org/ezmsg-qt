@@ -41,7 +41,7 @@ def test_endpoints_attach_to_session(qtbot):
     assert pub.session is session
 
 
-def test_subscriber_preserves_initial_topic_before_bridge_start(qtbot):
+def test_subscriber_preserves_initial_topic_before_session_start(qtbot):
     session = EzSession()
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)

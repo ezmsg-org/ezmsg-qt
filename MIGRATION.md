@@ -8,10 +8,10 @@ Before:
 
 ```python
 app = QtWidgets.QApplication([])
-session = EzSession()
-widget = MyWidget(session)
+bridge = EzGuiBridge(app)
+widget = MyWidget(bridge)
 
-with session:
+with bridge:
     app.exec()
 ```
 
@@ -25,6 +25,8 @@ widget = MyWidget(session)
 with session:
     app.exec()
 ```
+
+The public bridge object is gone; `EzSession` is now the only public runtime owner.
 
 Attach endpoints explicitly:
 

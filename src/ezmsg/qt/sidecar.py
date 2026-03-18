@@ -138,7 +138,7 @@ class PipelineCollection(ez.Collection):
 
 @dataclass(frozen=True)
 class CompiledPipeline:
-    """Bridge-facing metadata for a compiled pipeline."""
+    """Session-facing metadata for a compiled pipeline."""
 
     chain: ProcessorChain
     component_name: str

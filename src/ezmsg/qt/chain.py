@@ -113,14 +113,14 @@ class ProcessorChain:
 
     def __init__(
         self,
-        source_topic: Enum,
+        source_topic: Enum | str,
         parent: QtWidgets.QWidget | None = None,
         auto_gate: bool = True,
     ):
         """Create a processor chain.
 
         Args:
-            source_topic: The topic enum to subscribe to.
+            source_topic: The topic name to subscribe to.
             parent: Optional parent widget for auto-gating.
             auto_gate: If True, gate based on parent widget visibility.
         """
@@ -134,7 +134,7 @@ class ProcessorChain:
         self._attached = False
 
     @property
-    def source_topic(self) -> Enum:
+    def source_topic(self) -> Enum | str:
         """The source topic this chain subscribes to."""
         return self._source_topic
 

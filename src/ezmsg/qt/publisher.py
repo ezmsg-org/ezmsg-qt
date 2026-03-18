@@ -43,7 +43,7 @@ class EzPublisher(QtCore.QObject):
             def __init__(self):
                 super().__init__()
                 self.settings_pub = EzPublisher(
-                    VelocityTopic.INPUT_SETTINGS, parent=self
+                    VelocityTopic.INPUT_SETTINGS, parent=self, session=session
                 )
                 self.slider.valueChanged.connect(self.send_settings)
 
@@ -69,7 +69,7 @@ class EzPublisher(QtCore.QObject):
         Create a publisher for an ezmsg topic.
 
         Args:
-            topic: The topic enum to publish to.
+            topic: The initial topic to publish to, or None to start unpublished.
             parent: Optional parent QObject for lifecycle management.
         """
         super().__init__(parent)
@@ -169,13 +169,6 @@ class EzPublisher(QtCore.QObject):
             maxsize = 0 if self._max_pending is None else self._max_pending
             self._async_queue = asyncio.Queue(maxsize=maxsize)
 
-        with self._pending_lock:
-            pending = list(self._pending)
-            self._pending.clear()
-
-        for message in pending:
-            self._enqueue_async(message)
-
     async def _get_message(self) -> Any:
         if self._async_queue is None:
             raise RuntimeError("Publisher runtime queue is not initialized")
@@ -206,12 +199,30 @@ class EzPublisher(QtCore.QObject):
             return
 
         if self._max_pending is not None and len(self._pending) >= self._max_pending:
+            if self._queue_policy == "block":
+                raise RuntimeError(
+                    "EzPublisher cannot block before the session runtime starts"
+                )
             if self._queue_policy == "drop_latest":
                 return
             if self._queue_policy == "drop_oldest":
                 self._pending.popleft()
 
         self._pending.append(message)
+
+    async def _flush_pending(self) -> None:
+        if self._async_queue is None:
+            return
+
+        with self._pending_lock:
+            pending = list(self._pending)
+            self._pending.clear()
+
+        for message in pending:
+            if self._queue_policy == "block":
+                await self._async_queue.put(message)
+            else:
+                self._enqueue_async(message)
 
     def _enqueue_async(self, message: Any) -> None:
         if self._async_queue is None:

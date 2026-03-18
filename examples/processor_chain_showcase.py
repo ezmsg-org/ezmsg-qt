@@ -266,11 +266,11 @@ def main():
             auto_close_ms = os.getenv("EZMSG_QT_DEMO_AUTOCLOSE_MS")
             if auto_close_ms is not None:
                 QtCore.QTimer.singleShot(int(auto_close_ms), app.quit)
-            print("[Main] Bridge active, starting Qt event loop...", flush=True)
+            print("[Main] Session active, starting Qt event loop...", flush=True)
             app.exec()
             print("[Main] Qt event loop exited, calling app.quit()...", flush=True)
             app.quit()
-        print("[Main] Bridge context exited", flush=True)
+        print("[Main] Session context exited", flush=True)
     finally:
         print("[Main] Finally block...", flush=True)
         if runner.running:

@@ -143,7 +143,15 @@ with session:
 ### EzSubscriber
 
 ```python
-EzSubscriber(topic: Enum | str | None = None, parent: QObject = None)
+EzSubscriber(
+    topic: Enum | str | None = None,
+    parent: QObject = None,
+    *,
+    session: EzSession | None = None,
+    leaky: bool = False,
+    max_queue: int | None = None,
+    throttle_hz: float | None = None,
+)
 ```
 
 - `session`: The session that owns this subscriber
@@ -156,7 +164,14 @@ EzSubscriber(topic: Enum | str | None = None, parent: QObject = None)
 ### EzPublisher
 
 ```python
-EzPublisher(topic: Enum | str | None = None, parent: QObject = None)
+EzPublisher(
+    topic: Enum | str | None = None,
+    parent: QObject = None,
+    *,
+    session: EzSession | None = None,
+    queue_policy: QueuePolicy = "unbounded",
+    max_pending: int | None = None,
+)
 ```
 
 - `session`: The session that owns this publisher
