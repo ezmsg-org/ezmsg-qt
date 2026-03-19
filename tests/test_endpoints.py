@@ -6,8 +6,8 @@ from typing import cast
 import pytest
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 from ezmsg.qt.sidecar import normalize_topic
 

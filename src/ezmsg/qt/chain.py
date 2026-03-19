@@ -7,13 +7,11 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from typing import Any
-from typing import TYPE_CHECKING
 from typing import Literal
-from typing import Union
-
-from qtpy import QtWidgets
+from typing import TYPE_CHECKING
 
 import ezmsg.core as ez
+from qtpy import QtWidgets
 
 if TYPE_CHECKING:
     from .session import EzSession
@@ -23,11 +21,7 @@ if TYPE_CHECKING:
 # - Unit class: LowPassFilter
 # - Unit class with settings: (LowPassFilter, LowPassSettings(...))
 # - Transformer instance: MyTransformer(factor=2)
-ProcessorSpec = Union[
-    type[ez.Unit],  # Unit class
-    tuple[type[ez.Unit], ez.Settings],  # (Unit class, settings)
-    Any,  # transformer instance (BaseProcessor or similar)
-]
+ProcessorSpec = type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | Any
 
 
 def _is_process_safe(spec: ProcessorSpec) -> bool:

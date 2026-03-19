@@ -7,21 +7,21 @@ This example demonstrates:
 3. The EzSession connecting them together
 """
 
+import os
 import sys
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from enum import auto
 from enum import Enum
-import os
-import time
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 
 

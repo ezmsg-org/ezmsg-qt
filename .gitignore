@@ -73,3 +73,6 @@ Thumbs.db
 # Project specific
 uv.lock
 .ruff_cache/
+
+# hatch-vcs generated version file
+src/ezmsg/qt/__version__.py

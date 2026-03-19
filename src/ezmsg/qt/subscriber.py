@@ -12,8 +12,9 @@ from qtpy import QtCore
 from .sidecar import normalize_topic
 
 if TYPE_CHECKING:
-    from .session import EzSession
     from ezmsg.core.subclient import Subscriber
+
+    from .session import EzSession
 
 
 TopicLike = Enum | str | None

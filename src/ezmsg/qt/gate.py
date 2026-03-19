@@ -1,9 +1,9 @@
 """Gate unit for controlling message flow in processor chains."""
 
 import logging
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
-from typing import AsyncGenerator
 
 import ezmsg.core as ez
 

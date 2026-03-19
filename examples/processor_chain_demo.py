@@ -6,17 +6,18 @@ Demonstrates compiled processor pipelines with shared and isolated
 sidecar execution stages.
 """
 
-import sys
-from enum import Enum
 import os
-from typing import AsyncGenerator
+import sys
+from collections.abc import AsyncGenerator
+from enum import Enum
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzSession, ProcessorChain
+from ezmsg.qt import EzSession
+from ezmsg.qt import ProcessorChain
 
 
 class DemoTopic(Enum):

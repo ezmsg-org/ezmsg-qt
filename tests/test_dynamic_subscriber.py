@@ -7,8 +7,8 @@ from typing import cast
 
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 
 

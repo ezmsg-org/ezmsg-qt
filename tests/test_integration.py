@@ -1,7 +1,7 @@
 """Integration tests for processor chains."""
 
+from collections.abc import AsyncGenerator
 from enum import Enum
-from typing import AsyncGenerator
 
 import ezmsg.core as ez
 
@@ -36,7 +36,7 @@ def _run_chain(qtbot, chain_builder, expected: list[float]) -> list[float]:
     from ezmsg.qt import EzPublisher
     from ezmsg.qt import EzSession
 
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     session = EzSession()
 
     results: list[float] = []
@@ -62,12 +62,12 @@ def test_local_chain_integration(qtbot):
 
     results = _run_chain(
         qtbot,
-        lambda widget, session, results: ProcessorChain(
-            DemoTopic.INPUT, parent=widget, auto_gate=False
-        )
-        .local(AddOneProcessor)
-        .connect(results.append)
-        .attach(session),
+        lambda widget, session, results: (
+            ProcessorChain(DemoTopic.INPUT, parent=widget, auto_gate=False)
+            .local(AddOneProcessor)
+            .connect(results.append)
+            .attach(session)
+        ),
         [6.0, 11.0],
     )
 
@@ -80,12 +80,12 @@ def test_parallel_chain_integration(qtbot):
 
     results = _run_chain(
         qtbot,
-        lambda widget, session, results: ProcessorChain(
-            DemoTopic.INPUT, parent=widget, auto_gate=False
-        )
-        .parallel(DoubleProcessor)
-        .connect(results.append)
-        .attach(session),
+        lambda widget, session, results: (
+            ProcessorChain(DemoTopic.INPUT, parent=widget, auto_gate=False)
+            .parallel(DoubleProcessor)
+            .connect(results.append)
+            .attach(session)
+        ),
         [10.0, 20.0],
     )
 
@@ -98,13 +98,13 @@ def test_mixed_chain_integration(qtbot):
 
     results = _run_chain(
         qtbot,
-        lambda widget, session, results: ProcessorChain(
-            DemoTopic.INPUT, parent=widget, auto_gate=False
-        )
-        .parallel(DoubleProcessor)
-        .local(AddOneProcessor)
-        .connect(results.append)
-        .attach(session),
+        lambda widget, session, results: (
+            ProcessorChain(DemoTopic.INPUT, parent=widget, auto_gate=False)
+            .parallel(DoubleProcessor)
+            .local(AddOneProcessor)
+            .connect(results.append)
+            .attach(session)
+        ),
         [11.0, 21.0],
     )
 

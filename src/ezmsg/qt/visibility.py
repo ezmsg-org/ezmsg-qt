@@ -3,7 +3,6 @@
 from collections.abc import Callable
 
 from qtpy import QtCore
-from qtpy import QtWidgets
 
 
 class VisibilityFilter(QtCore.QObject):
