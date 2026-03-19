@@ -240,7 +240,7 @@ class EzSession:
         self._pipelines[key] = chain
 
     def _bind_destroyed(self, obj: QtCore.QObject, callback, key: int) -> None:
-        obj.destroyed.connect(lambda *_args: callback(key))
+        obj.destroyed.connect(lambda *_args, _key=key: callback(_key))
 
     def _detach_subscriber(self, key: int) -> None:
         subscriber = self._subscribers.pop(key, None)
