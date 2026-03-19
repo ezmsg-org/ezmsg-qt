@@ -1,21 +1,53 @@
 [project]
 name = "ezmsg-qt"
-version = "0.1.0"
 description = "Qt integration for ezmsg with direct topic-based pub/sub"
+authors = [
+  { name = "Preston Peranich", email = "pperanich@gmail.com" },
+]
+license = "MIT"
 readme = "README.md"
-requires-python = ">=3.10.15"
+requires-python = ">=3.10"
+dynamic = ["version"]
 dependencies = ["ezmsg>=3.8", "qtpy>=2.4.1"]
 
 [project.optional-dependencies]
 examples = ["ezmsg-baseproc", "fastplotlib>=0.6.1", "numpy>=2.0.0"]
 pyqt6 = ["pyqt6>=6.0.0"]
 pyside6 = ["pyside6>=6.0.0"]
-test = ["numpy>=2.0.0", "pytest>=7.0.0", "pytest-qt>=4.0.0"]
+
+[dependency-groups]
+dev = [
+  "pre-commit>=4.0.0",
+  {include-group = "lint"},
+  {include-group = "test"},
+]
+lint = [
+  "ruff",
+]
+test = [
+  "numpy>=2.0.0",
+  "pytest>=7.0.0",
+  "pytest-qt>=4.0.0",
+]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/ezmsg/qt/__version__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ezmsg"]
 
 [tool.ruff]
 src = ["src"]
 fix = true
 show-fixes = true
+exclude = ["*/__version__.py"]
 
 [tool.pyright.defineConstant]
 PYQT5 = false
@@ -36,13 +68,5 @@ select = [
 [tool.ruff.lint.isort]
 force-single-line = true
 order-by-type = false
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/ezmsg"]
+known-first-party = ["ezmsg.qt"]
+known-third-party = ["ezmsg"]

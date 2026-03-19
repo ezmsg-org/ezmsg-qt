@@ -179,3 +179,39 @@ EzPublisher(
 - `set_topic(topic)`: Switch to a new topic on a running session
 - `clear_topic()`: Unpublish from the current topic on a running session
 - `switch_started`, `topic_changed`, `topic_cleared`, `switch_failed`: lifecycle signals for runtime switching
+
+## Installation
+
+Install from PyPI:
+
+```bash
+pip install ezmsg-qt
+```
+
+You also need a Qt binding — pick one:
+
+```bash
+pip install ezmsg-qt[pyqt6]   # or
+pip install ezmsg-qt[pyside6]
+```
+
+Or install the latest development version:
+
+```bash
+pip install git+https://github.com/ezmsg-org/ezmsg-qt@main
+```
+
+## Development
+
+We use [`uv`](https://docs.astral.sh/uv/getting-started/installation/) for development.
+
+1. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/) if not already installed.
+2. Fork this repository and clone your fork locally.
+3. Open a terminal and `cd` to the cloned folder.
+4. Run `uv sync --extra pyside6` to create a `.venv` and install dependencies.
+5. (Optional) Install pre-commit hooks: `uv run pre-commit install`
+6. After making changes, run the test suite: `uv run pytest tests`
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
