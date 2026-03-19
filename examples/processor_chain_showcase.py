@@ -11,10 +11,10 @@ Demonstrates all features of the processor chains API:
 
 """
 
+import os
 import sys
 from collections.abc import AsyncGenerator
 from enum import Enum
-import os
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner

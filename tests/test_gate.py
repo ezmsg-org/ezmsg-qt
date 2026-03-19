@@ -1,9 +1,5 @@
 """Tests for MessageGate unit."""
 
-import asyncio
-
-import ezmsg.core as ez
-
 from ezmsg.qt.gate import GateMessage
 from ezmsg.qt.gate import MessageGate
 from ezmsg.qt.gate import MessageGateSettings

@@ -1,13 +1,13 @@
 """Tests for auto-gating integration."""
 
+from collections.abc import AsyncGenerator
 from enum import Enum
-from typing import AsyncGenerator
 
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
-from ezmsg.qt.session import EzSession
 from ezmsg.qt.chain import ProcessorChain
+from ezmsg.qt.session import EzSession
 
 
 class DemoTopic(Enum):

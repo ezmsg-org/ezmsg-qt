@@ -10,8 +10,8 @@ This test proves:
 
 import asyncio
 import math
-import sys
 import os
+import sys
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -22,8 +22,8 @@ from ezmsg.core.backend import GraphRunner
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 
 

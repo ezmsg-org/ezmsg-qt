@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass
 import logging
 import signal
 import socket
 import threading
-from typing import TYPE_CHECKING
-from typing import Any
 import weakref
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
+from typing import Any
+from typing import TYPE_CHECKING
 
 from ezmsg.core.backend import GraphRunner
 from ezmsg.core.graphcontext import GraphContext
@@ -22,8 +22,8 @@ from qtpy import QtCore
 from qtpy import QtWidgets
 
 from .gate import GateMessage
-from .sidecar import CompiledPipeline
 from .sidecar import build_sidecar_components
+from .sidecar import CompiledPipeline
 from .sidecar import normalize_topic
 
 if TYPE_CHECKING:
@@ -578,7 +578,7 @@ class EzSession:
 
         event_filter = VisibilityFilter(on_visibility, parent=widget)
         widget.installEventFilter(event_filter)
-        setattr(chain, "_visibility_filter", event_filter)
+        chain._visibility_filter = event_filter
 
     async def _send_gate_message(self, chain: ProcessorChain, open: bool) -> None:
         runtime = self._pipeline_runtime.get(id(chain))

@@ -23,8 +23,8 @@ from ezmsg.util.messages.axisarray import AxisArray
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzSession
 from ezmsg.qt import EzPublisher
+from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
 
 ClockTickType = object if AxisArray is None else AxisArray.LinearAxis

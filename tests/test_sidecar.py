@@ -1,7 +1,7 @@
 """Tests for sidecar GraphRunner."""
 
+from collections.abc import AsyncGenerator
 from enum import Enum
-from typing import AsyncGenerator
 
 import ezmsg.core as ez
 

@@ -1,13 +1,12 @@
 """Tests for ProcessorChain."""
 
+from collections.abc import AsyncGenerator
 from enum import Enum
-from typing import AsyncGenerator
 
 import ezmsg.core as ez
 
-from ezmsg.qt.chain import ProcessorChain
-from ezmsg.qt.chain import ProcessorGroup
 from ezmsg.qt.chain import _to_unit
+from ezmsg.qt.chain import ProcessorChain
 
 
 class DemoTopic(Enum):

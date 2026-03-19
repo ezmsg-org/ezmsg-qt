@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 import types
 import typing
-from typing import Any, get_args, get_origin, get_type_hints
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+from typing import get_args
+from typing import get_origin
+from typing import get_type_hints
 
 from qtpy import QtWidgets
 

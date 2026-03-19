@@ -48,17 +48,19 @@ output topics.
 
 import asyncio
 import sys
-import time
 import threading
+import time
 from collections.abc import AsyncGenerator
-from typing import Any
 
 import ezmsg.core as ez
 from ezmsg.core.backend import GraphRunner
 
 # Add parent path to import our gate
 sys.path.insert(0, str(__file__).rsplit("/", 2)[0] + "/src")
-from ezmsg.qt.gate import MessageGate, MessageGateSettings
+from ezmsg.core.graphcontext import GraphContext
+
+from ezmsg.qt.gate import MessageGate
+from ezmsg.qt.gate import MessageGateSettings
 
 
 class DataGenerator(ez.Unit):
@@ -124,9 +126,6 @@ class Passthrough3(ez.Unit):
         if int(msg) % 20 == 0:  # Print every 20th message
             print(f"[P3] {msg}", flush=True)
         yield self.OUTPUT, msg
-
-
-from ezmsg.core.graphcontext import GraphContext
 
 
 class SessionLikeContext:
@@ -212,7 +211,8 @@ class SessionLikeContext:
 
         await asyncio.sleep(0.5)  # Like the real session runtime does
 
-        # NOW create subscriber for sidecar's output (like the real session does after sidecar start)
+        # NOW create subscriber for sidecar's output
+        #  (like the real session does after sidecar start)
         print("[Session] Creating subscriber for OUTPUT_TOPIC...", flush=True)
         sub = await self._context.subscriber("OUTPUT_TOPIC")
         print("[Session] Subscriber created", flush=True)
@@ -270,7 +270,7 @@ def main():
     # Use our session-like context (mimics EzSession)
     print("[Main] Creating session-like context...", flush=True)
     try:
-        with SessionLikeContext(primary.graph_address) as session:
+        with SessionLikeContext(primary.graph_address) as _:
             print("[Main] Session active, running for 3 seconds...", flush=True)
             time.sleep(3)
             print(

@@ -5,15 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from importlib import import_module
-from typing import TYPE_CHECKING
 from typing import Any
+from typing import TYPE_CHECKING
 
 import ezmsg.core as ez
 from ezmsg.core.collection import NetworkDefinition
 
-from .chain import ProcessorGroup
 from .chain import _to_unit
-from .gate import GateMessage
 from .gate import MessageGate
 from .gate import MessageGateSettings
 

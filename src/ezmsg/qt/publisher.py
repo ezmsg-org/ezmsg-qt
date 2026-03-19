@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 import threading
+from collections import deque
 from enum import Enum
 from typing import Any
-from typing import TYPE_CHECKING
 from typing import Literal
+from typing import TYPE_CHECKING
 
 from qtpy import QtCore
 
 from .sidecar import normalize_topic
 
 if TYPE_CHECKING:
-    from .session import EzSession
     from ezmsg.core.pubclient import Publisher
+
+    from .session import EzSession
 
 
 QueuePolicy = Literal[
