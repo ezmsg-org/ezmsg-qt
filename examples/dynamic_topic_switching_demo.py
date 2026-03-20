@@ -73,7 +73,8 @@ class DynamicTopicWidget(QtWidgets.QWidget):
         layout.setSpacing(12)
 
         instructions = QtWidgets.QLabel(
-            "Choose a topic. The same EzSubscriber retargets without reconnecting the slot."
+            "Choose a topic. The same EzSubscriber retargets "
+            + "without reconnecting the slot."
         )
         instructions.setWordWrap(True)
         instructions.setSizePolicy(

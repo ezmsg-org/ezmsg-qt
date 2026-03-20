@@ -7,7 +7,10 @@ from ezmsg.qt.visibility import VisibilityFilter
 
 def test_visibility_filter_creation(qtbot):
     """VisibilityFilter can be created."""
-    callback = lambda visible: None
+
+    def callback(visible):
+        return None
+
     vf = VisibilityFilter(callback)
     assert vf is not None
 
