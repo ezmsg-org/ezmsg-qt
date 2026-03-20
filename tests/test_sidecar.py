@@ -48,6 +48,29 @@ def test_build_sidecar_components_single_parallel_group():
     assert len(connections) > 0
     assert process_components == (components["test_chain_group_0"],)
     assert compiled[0].output_topic == "_qt.test_chain.out"
+    assert ("INPUT", "test_chain_gate/INPUT") in connections
+    assert ("test_chain_gate/OUTPUT", "test_chain_group_0/INPUT") in connections
+
+
+def test_build_sidecar_components_can_gate_at_output():
+    """Gate can be placed after processors instead of before them."""
+    from ezmsg.qt.chain import ProcessorChain
+
+    chain = ProcessorChain(
+        DemoTopic.INPUT,
+        parent=None,
+        auto_gate_position="output",
+    )
+    chain._chain_id = "test_chain"
+    chain.local(DoubleProcessor).connect(lambda _msg: None)
+
+    _components, connections, _process_components, compiled = build_sidecar_components(
+        [chain]
+    )
+
+    assert ("INPUT", "test_chain_group_0/INPUT") in connections
+    assert ("test_chain_group_0/OUTPUT", "test_chain_gate/INPUT") in connections
+    assert ("test_chain_gate/OUTPUT", compiled[0].output_topic) in connections
 
 
 def test_build_sidecar_components_multiple_processors_in_group():

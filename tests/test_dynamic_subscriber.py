@@ -155,3 +155,75 @@ def test_switch_signals_emit_in_order(qtbot):
         ("started", None),
         ("cleared", None),
     ]
+
+
+def test_auto_gate_blocks_delivery_until_widget_shown(qtbot):
+    session = EzSession()
+    widget = QtWidgets.QWidget()
+    qtbot.addWidget(widget)
+
+    received: list[str] = []
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session, auto_gate=True)
+    sub.connect(received.append)
+    pub = EzPublisher(DemoTopic.A, parent=widget, session=session)
+
+    with session:
+        pub.emit("hidden")
+        qtbot.wait(200)
+        assert received == []
+
+        widget.show()
+        qtbot.waitUntil(widget.isVisible, timeout=2000)
+
+        pub.emit("visible")
+        qtbot.waitUntil(lambda: received == ["visible"], timeout=2000)
+
+
+def test_auto_gate_switches_topic_while_hidden(qtbot):
+    session = EzSession()
+    widget = QtWidgets.QWidget()
+    qtbot.addWidget(widget)
+
+    received: list[str] = []
+    sub = EzSubscriber(DemoTopic.A, parent=widget, session=session, auto_gate=True)
+    sub.connect(received.append)
+    pub_a = EzPublisher(DemoTopic.A, parent=widget, session=session)
+    pub_b = EzPublisher(DemoTopic.B, parent=widget, session=session)
+
+    with session:
+        sub.set_topic(DemoTopic.B)
+
+        pub_a.emit("a-hidden")
+        pub_b.emit("b-hidden")
+        qtbot.wait(200)
+        assert received == []
+
+        widget.show()
+        qtbot.waitUntil(widget.isVisible, timeout=2000)
+
+        pub_a.emit("a-visible")
+        pub_b.emit("b-visible")
+        qtbot.waitUntil(lambda: received == ["b-visible"], timeout=2000)
+
+
+def test_auto_gate_attach_after_start(qtbot):
+    session = EzSession()
+    widget = QtWidgets.QWidget()
+    qtbot.addWidget(widget)
+
+    received: list[str] = []
+
+    with session:
+        sub = EzSubscriber(DemoTopic.C, parent=widget, session=session, auto_gate=True)
+        sub.connect(received.append)
+        pub = EzPublisher(DemoTopic.C, parent=widget, session=session)
+
+        pub.emit("hidden")
+        qtbot.wait(200)
+        assert received == []
+
+        widget.show()
+        qtbot.waitUntil(widget.isVisible, timeout=2000)
+
+        pub.emit("visible")
+        qtbot.waitUntil(lambda: received == ["visible"], timeout=2000)

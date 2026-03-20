@@ -16,7 +16,7 @@ Example:
 
             # Processing pipeline with isolated and shared sidecar stages
             self.chain = (
-                ProcessorChain(MyTopic.RAW, parent=self)
+                ProcessorChain(MyTopic.RAW, parent=self, auto_gate=True)
                 .parallel(LowPassFilter, ScaleProcessor)
                 .local(ThresholdDetector)
                 .connect(self.on_processed)

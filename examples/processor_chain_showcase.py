@@ -151,7 +151,7 @@ class ProcessedDataWidget(QtWidgets.QWidget):
         # Set up processor chain with auto-gating
         # When this widget is hidden (tab switched), processing stops
         self.chain = (
-            ProcessorChain(DataTopic.SENSOR_DATA, parent=self)
+            ProcessorChain(DataTopic.SENSOR_DATA, parent=self, auto_gate=True)
             .parallel(LowPassFilter, ScaleProcessor)  # Sidecar (grouped)
             .local(ThresholdDetector)
             .connect(self.on_data)

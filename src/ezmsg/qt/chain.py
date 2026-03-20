@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from typing import Any
+from typing import cast
 from typing import Literal
 from typing import TYPE_CHECKING
 
 import ezmsg.core as ez
+from qtpy import QtCore
 from qtpy import QtWidgets
 
 if TYPE_CHECKING:
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 # - Unit class with settings: (LowPassFilter, LowPassSettings(...))
 # - Transformer instance: MyTransformer(factor=2)
 ProcessorSpec = type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | Any
+AutoGatePosition = Literal["input", "output"]
 
 
 def _is_process_safe(spec: ProcessorSpec) -> bool:
@@ -90,35 +93,36 @@ class ProcessorChain:
 
     Neither mode runs work on the Qt UI thread.
 
-    Example:
-        # Using Unit classes
-        chain = (
-            ProcessorChain(Topic.RAW, parent=widget)
-            .parallel(LowPassFilter, ScaleProcessor)
-            .local(ThresholdDetector)
-            .connect(widget.on_data)
-        )
+        Example:
+            # Using Unit classes
+            chain = (
+                ProcessorChain(Topic.RAW, parent=widget, auto_gate=True)
+                .parallel(LowPassFilter, ScaleProcessor)
+                .local(ThresholdDetector)
+                .connect(widget.on_data)
+            )
 
-        # Using Unit classes with settings
-        chain = (
-            ProcessorChain(Topic.RAW, parent=widget)
-            .parallel((LowPassFilter, LowPassSettings(alpha=0.5)))
-            .connect(widget.on_data)
-        )
+            # Using Unit classes with settings
+            chain = (
+                ProcessorChain(Topic.RAW, parent=widget, auto_gate=True)
+                .parallel((LowPassFilter, LowPassSettings(alpha=0.5)))
+                .connect(widget.on_data)
+            )
 
-        # Using transformer instances
-        chain = (
-            ProcessorChain(Topic.RAW, parent=widget)
-            .parallel(LowPassFilter(), ScaleProcessor(factor=2))
-            .connect(widget.on_data)
-        )
+            # Using transformer instances
+            chain = (
+                ProcessorChain(Topic.RAW, parent=widget, auto_gate=True)
+                .parallel(LowPassFilter(), ScaleProcessor(factor=2))
+                .connect(widget.on_data)
+            )
     """
 
     def __init__(
         self,
         source_topic: Enum | str,
         parent: QtWidgets.QWidget | None = None,
-        auto_gate: bool = True,
+        auto_gate: bool = False,
+        auto_gate_position: AutoGatePosition = "input",
     ):
         """Create a processor chain.
 
@@ -126,15 +130,23 @@ class ProcessorChain:
             source_topic: The topic name to subscribe to.
             parent: Optional parent widget for auto-gating.
             auto_gate: If True, gate based on parent widget visibility.
+            auto_gate_position: Place the gate before processors ("input") or
+                after processors ("output").
         """
+        if auto_gate_position not in ("input", "output"):
+            raise ValueError("auto_gate_position must be 'input' or 'output'")
+        validated_auto_gate_position = cast(AutoGatePosition, auto_gate_position)
+
         self._source_topic = source_topic
         self._parent_widget = parent
         self._auto_gate = auto_gate
+        self._auto_gate_position: AutoGatePosition = validated_auto_gate_position
         self._groups: list[ProcessorGroup] = []
         self._handler: Callable[[Any], None] | None = None
         self._chain_id: str | None = None
         self._session: EzSession | None = None
         self._attached = False
+        self._visibility_filter: QtCore.QObject | None = None
 
     @property
     def source_topic(self) -> Enum | str:
@@ -155,6 +167,11 @@ class ProcessorChain:
     def auto_gate(self) -> bool:
         """Whether auto-gating based on visibility is enabled."""
         return self._auto_gate
+
+    @property
+    def auto_gate_position(self) -> AutoGatePosition:
+        """Whether the gate sits at the chain input or output."""
+        return self._auto_gate_position
 
     @property
     def handler(self) -> Callable[[Any], None] | None:

@@ -8,6 +8,7 @@ from typing import Any
 from typing import TYPE_CHECKING
 
 from qtpy import QtCore
+from qtpy import QtWidgets
 
 from .sidecar import normalize_topic
 
@@ -54,6 +55,7 @@ class EzSubscriber(QtCore.QObject):
         parent: QtCore.QObject | None = None,
         *,
         session: EzSession | None = None,
+        auto_gate: bool = False,
         leaky: bool = False,
         max_queue: int | None = None,
         throttle_hz: float | None = None,
@@ -64,6 +66,7 @@ class EzSubscriber(QtCore.QObject):
         Args:
             topic: The initial topic to subscribe to, or None to start unsubscribed.
             parent: Optional parent QObject for lifecycle management.
+            auto_gate: If True, suppress delivery while the parent widget is hidden.
             leaky: If True, the underlying ezmsg Subscriber will drop old messages
                 if the receiver can't keep up (no backpressure).
             max_queue: Queue depth for leaky mode. If None, ezmsg defaults apply.
@@ -75,10 +78,19 @@ class EzSubscriber(QtCore.QObject):
         self._desired_topic = self._topic
         self._sub: Subscriber | None = None  # Set by EzSession during setup
         self._session: EzSession | None = None
+        self._auto_gate = bool(auto_gate)
         self._leaky = bool(leaky)
         self._max_queue = max_queue
         self._throttle_hz = throttle_hz
         self._emit_epoch = 0
+        self._visibility_filter: QtCore.QObject | None = None
+
+        if (
+            self._auto_gate
+            and parent is not None
+            and not isinstance(parent, QtWidgets.QWidget)
+        ):
+            raise TypeError("EzSubscriber auto_gate requires a QWidget parent")
 
         if self._max_queue is not None and self._max_queue <= 0:
             raise ValueError("max_queue must be positive")
@@ -99,6 +111,11 @@ class EzSubscriber(QtCore.QObject):
         return self._session
 
     @property
+    def auto_gate(self) -> bool:
+        """Whether delivery is suppressed while the parent widget is hidden."""
+        return self._auto_gate
+
+    @property
     def leaky(self) -> bool:
         """Whether this subscriber drops old messages instead of backpressure."""
         return self._leaky
@@ -112,6 +129,14 @@ class EzSubscriber(QtCore.QObject):
     def throttle_hz(self) -> float | None:
         """If set, throttle reads from the underlying ezmsg Subscriber."""
         return self._throttle_hz
+
+    @property
+    def parent_widget(self) -> QtWidgets.QWidget | None:
+        """The QWidget used for auto-gating, if available."""
+        parent = self.parent()
+        if isinstance(parent, QtWidgets.QWidget):
+            return parent
+        return None
 
     def connect(self, slot: Callable[[Any], None]) -> None:
         """

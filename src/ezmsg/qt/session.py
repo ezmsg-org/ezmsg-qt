@@ -8,6 +8,7 @@ import signal
 import socket
 import threading
 import weakref
+from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any
@@ -43,6 +44,7 @@ class _SubscriberRuntime:
     client: Any | None = None
     task: asyncio.Task[None] | None = None
     active_topic: str | None = None
+    gate_open: bool = True
 
 
 @dataclass
@@ -440,9 +442,83 @@ class EzSession:
 
         runtime = _SubscriberRuntime(switch_lock=asyncio.Lock())
         self._subscriber_runtime[key] = runtime
+        try:
+            self._configure_subscriber_auto_gate(ez_sub, runtime)
 
-        if ez_sub._desired_topic is not None:
-            await self._switch_subscriber(ez_sub, ez_sub._desired_topic)
+            if ez_sub._desired_topic is not None:
+                await self._switch_subscriber(ez_sub, ez_sub._desired_topic)
+        except Exception:
+            self._subscriber_runtime.pop(key, None)
+            if ez_sub.auto_gate:
+                self._dispatch(self._clear_visibility_gate, ez_sub)
+            raise
+
+    def _configure_subscriber_auto_gate(
+        self, ez_sub: EzSubscriber, runtime: _SubscriberRuntime
+    ) -> None:
+        if not ez_sub.auto_gate:
+            runtime.gate_open = True
+            return
+
+        widget = ez_sub.parent_widget
+        if widget is None:
+            raise TypeError("EzSubscriber auto_gate requires a QWidget parent")
+
+        runtime.gate_open = widget.isVisible()
+        self._dispatch(self._setup_subscriber_auto_gate, ez_sub)
+
+    def _setup_subscriber_auto_gate(self, ez_sub: EzSubscriber) -> None:
+        widget = ez_sub.parent_widget
+        runtime = self._subscriber_runtime.get(id(ez_sub))
+        if widget is None or runtime is None:
+            return
+
+        visible = widget.isVisible()
+        if runtime.gate_open != visible:
+            if not visible:
+                ez_sub._emit_epoch += 1
+            runtime.gate_open = visible
+
+        subscriber_ref = weakref.ref(ez_sub)
+
+        def on_visibility(visible: bool) -> None:
+            current_sub = subscriber_ref()
+            if current_sub is None:
+                return
+
+            current_runtime = self._subscriber_runtime.get(id(current_sub))
+            if current_runtime is None or current_runtime.gate_open == visible:
+                return
+
+            if not visible:
+                current_sub._emit_epoch += 1
+            current_runtime.gate_open = visible
+
+        self._install_visibility_gate(ez_sub, widget, on_visibility)
+
+    def _install_visibility_gate(
+        self,
+        owner: object,
+        widget: QtWidgets.QWidget,
+        callback: Callable[[bool], None],
+    ) -> None:
+        from .visibility import VisibilityFilter
+
+        self._clear_visibility_gate(owner)
+        event_filter = VisibilityFilter(callback, parent=widget)
+        widget.installEventFilter(event_filter)
+        owner._visibility_filter = event_filter
+
+    def _clear_visibility_gate(self, owner: object) -> None:
+        event_filter = getattr(owner, "_visibility_filter", None)
+        if event_filter is None:
+            return
+
+        parent = event_filter.parent()
+        if isinstance(parent, QtWidgets.QWidget):
+            parent.removeEventFilter(event_filter)
+        event_filter.deleteLater()
+        owner._visibility_filter = None
 
     async def _switch_subscriber(self, ez_sub: EzSubscriber, topic) -> None:
         key = id(ez_sub)
@@ -560,8 +636,6 @@ class EzSession:
         )
 
     def _setup_auto_gate(self, chain: ProcessorChain) -> None:
-        from .visibility import VisibilityFilter
-
         widget = chain.parent_widget
         if widget is None:
             return
@@ -576,9 +650,7 @@ class EzSession:
                 self._send_gate_message(current_chain, visible), self._loop
             )
 
-        event_filter = VisibilityFilter(on_visibility, parent=widget)
-        widget.installEventFilter(event_filter)
-        chain._visibility_filter = event_filter
+        self._install_visibility_gate(chain, widget, on_visibility)
 
     async def _send_gate_message(self, chain: ProcessorChain, open: bool) -> None:
         runtime = self._pipeline_runtime.get(id(chain))
@@ -587,6 +659,10 @@ class EzSession:
         await runtime.gate_publisher.broadcast(GateMessage(open=open))
 
     async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
+        runtime = self._subscriber_runtime.get(id(ez_sub))
+        if runtime is None:
+            raise RuntimeError("Subscriber runtime is not initialized")
+
         rate = None
         if ez_sub.throttle_hz is not None:
             from ezmsg.util.rate import Rate
@@ -597,8 +673,9 @@ class EzSession:
             while self._running:
                 epoch = ez_sub._emit_epoch
                 msg = await sub.recv()
-                self._dispatch(ez_sub._on_message, msg, epoch)
-                if rate is not None:
+                if runtime.gate_open:
+                    self._dispatch(ez_sub._on_message, msg, epoch)
+                if runtime.gate_open and rate is not None:
                     await rate.sleep()
         except asyncio.CancelledError:
             logger.debug("Subscriber loop cancelled for %s", ez_sub.topic)
@@ -729,6 +806,7 @@ class EzSession:
         await self._close_subscriber_client(runtime)
 
         if subscriber is not None:
+            self._dispatch(self._clear_visibility_gate, subscriber)
             subscriber._sub = None
             subscriber._topic = None
             subscriber._desired_topic = None
@@ -745,6 +823,7 @@ class EzSession:
             publisher._desired_topic = None
 
     async def _close_pipeline_runtime(self, runtime: _PipelineRuntime) -> None:
+        self._dispatch(self._clear_visibility_gate, runtime.compiled.chain)
         runtime.task.cancel()
         await asyncio.gather(runtime.task, return_exceptions=True)
         runtime.client.close()

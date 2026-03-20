@@ -76,7 +76,7 @@ class DemoWidget(QtWidgets.QWidget):
         layout.addWidget(self.result_label)
 
         self.chain = (
-            ProcessorChain(DemoTopic.NUMBERS, parent=self)
+            ProcessorChain(DemoTopic.NUMBERS, parent=self, auto_gate=True)
             .parallel(DoubleProcessor)
             .local(SquareProcessor)
             .connect(self.on_result)

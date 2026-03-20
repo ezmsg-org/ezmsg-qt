@@ -137,12 +137,16 @@ def build_sidecar_components(
 
         connections.extend(
             [
-                (source_topic, f"{gate_name}/INPUT"),
                 (gate_topic, f"{gate_name}/INPUT_GATE"),
             ]
         )
 
-        previous: Any = f"{gate_name}/OUTPUT"
+        if chain.auto_gate_position == "input":
+            connections.append((source_topic, f"{gate_name}/INPUT"))
+            previous: Any = f"{gate_name}/OUTPUT"
+        else:
+            previous = source_topic
+
         group_names: list[str] = []
 
         for group_index, group in enumerate(chain.groups):
@@ -155,6 +159,10 @@ def build_sidecar_components(
 
             if group.mode == "process":
                 process_components.append(collection)
+
+        if chain.auto_gate_position == "output":
+            connections.append((previous, f"{gate_name}/INPUT"))
+            previous = f"{gate_name}/OUTPUT"
 
         connections.append((previous, output_topic))
 

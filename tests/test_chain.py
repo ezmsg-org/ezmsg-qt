@@ -53,6 +53,33 @@ def test_processor_chain_creation():
     chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
     assert chain.source_topic == DemoTopic.INPUT
     assert len(chain.groups) == 0
+    assert chain.auto_gate is False
+    assert chain.auto_gate_position == "input"
+
+
+def test_processor_chain_accepts_output_gate_position():
+    """ProcessorChain can place auto-gate after processors."""
+    chain = ProcessorChain(
+        source_topic=DemoTopic.INPUT,
+        parent=None,
+        auto_gate_position="output",
+    )
+
+    assert chain.auto_gate_position == "output"
+
+
+def test_processor_chain_rejects_invalid_gate_position():
+    """ProcessorChain validates gate placement values."""
+    try:
+        ProcessorChain(
+            source_topic=DemoTopic.INPUT,
+            parent=None,
+            auto_gate_position="middle",  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        assert "auto_gate_position" in str(exc)
+    else:
+        raise AssertionError("Expected ProcessorChain to reject invalid gate position")
 
 
 def test_processor_chain_parallel():
