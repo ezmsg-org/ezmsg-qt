@@ -81,6 +81,16 @@ class ProcessorGroup:
     mode: Literal["shared", "process"] = "shared"
 
 
+@dataclass(frozen=True)
+class ExternalInputBinding:
+    """Bind a public ezmsg topic to an internal processor input stream."""
+
+    topic: Enum | str
+    group_index: int
+    processor_index: int
+    input_name: str
+
+
 class ProcessorChain:
     """
     Fluent builder for processor chains.
@@ -142,11 +152,12 @@ class ProcessorChain:
         self._auto_gate = auto_gate
         self._auto_gate_position: AutoGatePosition = validated_auto_gate_position
         self._groups: list[ProcessorGroup] = []
+        self._external_inputs: list[ExternalInputBinding] = []
         self._handler: Callable[[Any], None] | None = None
         self._chain_id: str | None = None
         self._session: EzSession | None = None
         self._attached = False
-        self._visibility_filter: QtCore.QObject | None = None
+        self._visibility_filter: Any | None = None
 
     @property
     def source_topic(self) -> Enum | str:
@@ -177,6 +188,11 @@ class ProcessorChain:
     def handler(self) -> Callable[[Any], None] | None:
         """The Qt handler connected to this chain's output."""
         return self._handler
+
+    @property
+    def external_inputs(self) -> list[ExternalInputBinding]:
+        """External topic bindings into specific processor input streams."""
+        return self._external_inputs
 
     def parallel(self, *processors: ProcessorSpec) -> ProcessorChain:
         """Add processors to run in an isolated sidecar process.
@@ -233,6 +249,31 @@ class ProcessorChain:
         self._handler = slot
         return self
 
+    def bind_input(
+        self,
+        topic: Enum | str,
+        *,
+        group_index: int = -1,
+        processor_index: int = 0,
+        input_name: str = "INPUT_SETTINGS",
+    ) -> ProcessorChain:
+        """Bind a public topic to an internal processor input stream.
+
+        This is primarily useful for runtime settings updates, e.g. wiring a
+        ``*.settings`` topic into a processor group's ``INPUT_SETTINGS`` stream.
+        Negative indices follow standard Python indexing rules.
+        """
+
+        self._external_inputs.append(
+            ExternalInputBinding(
+                topic=topic,
+                group_index=group_index,
+                processor_index=processor_index,
+                input_name=input_name,
+            )
+        )
+        return self
+
     @property
     def session(self) -> EzSession | None:
         """The session this pipeline is attached to, if any."""
@@ -273,3 +314,22 @@ class ProcessorChain:
                         "parallel() only supports ez.Unit classes, ez.Unit instances, "
                         "or (UnitClass, Settings) tuples"
                     )
+
+        for binding in self._external_inputs:
+            group_index = binding.group_index
+            if group_index < 0:
+                group_index += len(self._groups)
+            if group_index < 0 or group_index >= len(self._groups):
+                raise IndexError(
+                    f"External input binding group index out of range: {binding.group_index}"
+                )
+
+            processors = self._groups[group_index].processors
+            processor_index = binding.processor_index
+            if processor_index < 0:
+                processor_index += len(processors)
+            if processor_index < 0 or processor_index >= len(processors):
+                raise IndexError(
+                    "External input binding processor index out of range: "
+                    f"{binding.processor_index}"
+                )

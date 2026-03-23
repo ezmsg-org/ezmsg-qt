@@ -164,6 +164,17 @@ def build_sidecar_components(
             connections.append((previous, f"{gate_name}/INPUT"))
             previous = f"{gate_name}/OUTPUT"
 
+        for binding in chain.external_inputs:
+            group_index = binding.group_index
+            if group_index < 0:
+                group_index += len(group_names)
+            processor_index = binding.processor_index
+            if processor_index < 0:
+                processor_index += len(chain.groups[group_index].processors)
+
+            target = f"{group_names[group_index]}/proc_{processor_index}/{binding.input_name}"
+            connections.append((normalize_topic(binding.topic), target))
+
         connections.append((previous, output_topic))
 
         compiled.append(
