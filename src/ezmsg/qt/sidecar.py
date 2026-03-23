@@ -71,22 +71,29 @@ class ProcessorGroupCollection(ez.Collection):
 
     def __init__(self, processors: list[Any]):
         super().__init__()
-        self._ordered_processors: list[tuple[str, ez.Unit]] = []
+        self._ordered_processors: list[tuple[str, ez.Unit, str | None, str | None]] = []
 
         for index, spec in enumerate(processors):
+            input_name = getattr(spec, "input_name", None)
+            output_name = getattr(spec, "output_name", None)
             unit = _to_unit(spec)
             name = f"proc_{index}"
             unit._set_name(name)
             self._components[name] = unit
             setattr(self, name, unit)
-            self._ordered_processors.append((name, unit))
+            self._ordered_processors.append((name, unit, input_name, output_name))
 
     def network(self) -> NetworkDefinition:
         edges: list[tuple[Any, Any]] = []
         previous: Any = self.INPUT
 
-        for _name, unit in self._ordered_processors:
+        for _name, unit, input_override, output_override in self._ordered_processors:
             input_name, output_name = _detect_stream_names(unit)
+            if input_override is not None:
+                input_name = input_override
+            if output_override is not None:
+                output_name = output_override
+
             edges.append((previous, getattr(unit, input_name)))
             previous = getattr(unit, output_name)
 

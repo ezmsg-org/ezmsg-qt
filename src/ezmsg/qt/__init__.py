@@ -38,6 +38,7 @@ Example:
         app.exec()
 """
 
+from .chain import BoundProcessor
 from .chain import ProcessorChain
 from .gate import GateMessage
 from .gate import MessageGate
@@ -52,6 +53,7 @@ __all__ = [
     "EzPublisher",
     "EzSubscriber",
     "ProcessorChain",
+    "BoundProcessor",
     "SettingsForm",
     "GateMessage",
     "MessageGate",

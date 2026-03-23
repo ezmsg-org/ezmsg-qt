@@ -5,6 +5,7 @@ from enum import Enum
 
 import ezmsg.core as ez
 
+from ezmsg.qt.chain import BoundProcessor
 from ezmsg.qt.chain import _to_unit
 from ezmsg.qt.chain import ProcessorChain
 
@@ -80,6 +81,17 @@ def test_processor_chain_rejects_invalid_gate_position():
         assert "auto_gate_position" in str(exc)
     else:
         raise AssertionError("Expected ProcessorChain to reject invalid gate position")
+
+
+def test_bound_processor_stores_stream_overrides():
+    """BoundProcessor keeps explicit input/output stream names."""
+    bound = BoundProcessor(
+        ConfigurableDouble, input_name="INPUT_SETTINGS", output_name="OUTPUT_STATUS"
+    )
+
+    assert bound.processor is ConfigurableDouble
+    assert bound.input_name == "INPUT_SETTINGS"
+    assert bound.output_name == "OUTPUT_STATUS"
 
 
 def test_processor_chain_parallel():

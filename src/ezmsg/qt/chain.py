@@ -23,11 +23,24 @@ if TYPE_CHECKING:
 # - Unit class: LowPassFilter
 # - Unit class with settings: (LowPassFilter, LowPassSettings(...))
 # - Transformer instance: MyTransformer(factor=2)
-ProcessorSpec = type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | Any
+
+
+@dataclass(frozen=True)
+class BoundProcessor:
+    """Wrap a processor spec with explicit main-path stream bindings."""
+
+    processor: type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | Any
+    input_name: str | None = None
+    output_name: str | None = None
+
+
+ProcessorSpec = type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | BoundProcessor | Any
 AutoGatePosition = Literal["input", "output"]
 
 
 def _is_process_safe(spec: ProcessorSpec) -> bool:
+    if isinstance(spec, BoundProcessor):
+        spec = spec.processor
     if isinstance(spec, ez.Unit):
         return True
     if isinstance(spec, tuple):
@@ -49,6 +62,9 @@ def _to_unit(spec: ProcessorSpec) -> ez.Unit:
     Raises:
         TypeError: If spec is not a recognized processor type.
     """
+    if isinstance(spec, BoundProcessor):
+        spec = spec.processor
+
     if isinstance(spec, ez.Unit):
         # Already instantiated unit (settings already applied)
         return spec

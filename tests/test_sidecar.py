@@ -2,9 +2,11 @@
 
 from collections.abc import AsyncGenerator
 from enum import Enum
+from typing import cast
 
 import ezmsg.core as ez
 
+from ezmsg.qt.chain import BoundProcessor
 from ezmsg.qt.sidecar import build_sidecar_components
 
 
@@ -20,6 +22,18 @@ class DoubleProcessor(ez.Unit):
     @ez.publisher(OUTPUT)
     async def process(self, msg: float) -> AsyncGenerator:
         yield self.OUTPUT, msg * 2
+
+
+class ConfigurableProcessor(ez.Unit):
+    INPUT = ez.InputStream(float)
+    INPUT_SETTINGS = ez.InputStream(float)
+    OUTPUT = ez.OutputStream(float)
+    OUTPUT_STATUS = ez.OutputStream(str)
+
+    @ez.subscriber(INPUT)
+    @ez.publisher(OUTPUT)
+    async def process(self, msg: float) -> AsyncGenerator:
+        yield self.OUTPUT, msg
 
 
 def test_build_sidecar_components_empty():
@@ -71,6 +85,62 @@ def test_build_sidecar_components_can_gate_at_output():
     assert ("INPUT", "test_chain_group_0/INPUT") in connections
     assert ("test_chain_group_0/OUTPUT", "test_chain_gate/INPUT") in connections
     assert ("test_chain_gate/OUTPUT", compiled[0].output_topic) in connections
+
+
+def test_group_collection_supports_custom_boundary_streams():
+    """ProcessorGroupCollection can override its public input/output streams."""
+    from ezmsg.qt.sidecar import ProcessorGroupCollection
+
+    group = ProcessorGroupCollection(
+        [
+            DoubleProcessor,
+            BoundProcessor(
+                ConfigurableProcessor,
+                input_name="INPUT_SETTINGS",
+                output_name="OUTPUT_STATUS",
+            ),
+        ]
+    )
+    proc_1 = getattr(group, "proc_1")
+    proc_0 = getattr(group, "proc_0")
+
+    edges = list(group.network())
+
+    assert edges[0] == (group.INPUT, proc_0.INPUT)
+    assert edges[1] == (proc_0.OUTPUT, proc_1.INPUT_SETTINGS)
+    assert edges[2] == (proc_1.OUTPUT_STATUS, group.OUTPUT)
+
+
+def test_build_sidecar_components_can_override_processor_streams():
+    """Wrapped processors override default main-path stream detection."""
+    from ezmsg.qt.chain import ProcessorChain
+
+    chain = ProcessorChain(DemoTopic.INPUT, parent=None)
+    chain._chain_id = "test_chain"
+    chain.local(
+        DoubleProcessor,
+        BoundProcessor(
+            ConfigurableProcessor,
+            input_name="INPUT_SETTINGS",
+            output_name="OUTPUT_STATUS",
+        ),
+    )
+    chain.connect(lambda _msg: None)
+
+    components, _connections, _process_components, _compiled = build_sidecar_components(
+        [chain]
+    )
+
+    from ezmsg.qt.sidecar import ProcessorGroupCollection
+
+    group = cast(ProcessorGroupCollection, components["test_chain_group_0"])
+    proc_1 = getattr(group, "proc_1")
+    proc_0 = getattr(group, "proc_0")
+    edges = list(group.network())
+
+    assert edges[0] == (group.INPUT, proc_0.INPUT)
+    assert edges[1] == (proc_0.OUTPUT, proc_1.INPUT_SETTINGS)
+    assert edges[2] == (proc_1.OUTPUT_STATUS, group.OUTPUT)
 
 
 def test_build_sidecar_components_multiple_processors_in_group():
