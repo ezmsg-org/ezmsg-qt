@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Processor Chain Demo
+Processor Graph Demo
 
 Demonstrates compiled processor pipelines with shared and isolated
 sidecar execution stages.
@@ -17,7 +17,7 @@ from qtpy import QtCore
 from qtpy import QtWidgets
 
 from ezmsg.qt import EzSession
-from ezmsg.qt import ProcessorChain
+from ezmsg.qt import ProcessorGraph
 
 
 class DemoTopic(Enum):
@@ -67,7 +67,7 @@ class NumberGenerator(ez.Unit):
 class DemoWidget(QtWidgets.QWidget):
     def __init__(self, session: EzSession):
         super().__init__()
-        self.setWindowTitle("Processor Chain Demo")
+        self.setWindowTitle("Processor Graph Demo")
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -75,8 +75,8 @@ class DemoWidget(QtWidgets.QWidget):
         self.result_label = QtWidgets.QLabel("Waiting for data...")
         layout.addWidget(self.result_label)
 
-        self.chain = (
-            ProcessorChain(DemoTopic.NUMBERS, parent=self, auto_gate=True)
+        self.graph = (
+            ProcessorGraph(DemoTopic.NUMBERS, parent=self, auto_gate=True)
             .parallel(DoubleProcessor)
             .local(SquareProcessor)
             .connect(self.on_result)

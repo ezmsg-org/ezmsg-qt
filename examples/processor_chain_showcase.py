@@ -2,12 +2,12 @@
 """
 Processor Chain Showcase
 
-Demonstrates all features of the processor chains API:
+Demonstrates all features of the processor graph API:
 - Fluent .parallel() / .local() API for grouping processors
 - .parallel() for running in sidecar (parallel processing)
 - .local() for running in the shared sidecar process
 - Auto-gating: processing stops when widget is hidden (e.g., tab not visible)
-- Mixed chains with both parallel and local groups
+- Mixed graphs with both parallel and local stages
 
 """
 
@@ -23,7 +23,7 @@ from qtpy import QtWidgets
 
 from ezmsg.qt import EzSession
 from ezmsg.qt import EzSubscriber
-from ezmsg.qt import ProcessorChain
+from ezmsg.qt import ProcessorGraph
 
 
 class DataTopic(Enum):
@@ -31,7 +31,7 @@ class DataTopic(Enum):
 
 
 # ============================================================================
-# Processors - These can be reused in different chain configurations
+# Processors - These can be reused in different graph configurations
 # ============================================================================
 
 
@@ -148,10 +148,10 @@ class ProcessedDataWidget(QtWidgets.QWidget):
 
         layout.addStretch()
 
-        # Set up processor chain with auto-gating
+        # Set up processor graph with auto-gating
         # When this widget is hidden (tab switched), processing stops
-        self.chain = (
-            ProcessorChain(DataTopic.SENSOR_DATA, parent=self, auto_gate=True)
+        self.graph = (
+            ProcessorGraph(DataTopic.SENSOR_DATA, parent=self, auto_gate=True)
             .parallel(LowPassFilter, ScaleProcessor)  # Sidecar (grouped)
             .local(ThresholdDetector)
             .connect(self.on_data)
@@ -191,7 +191,7 @@ class RawDataWidget(QtWidgets.QWidget):
         title = QtWidgets.QLabel("<b>Raw Sensor Data</b>")
         layout.addWidget(title)
 
-        desc = QtWidgets.QLabel("Direct subscription - no processor chain")
+        desc = QtWidgets.QLabel("Direct subscription - no processor graph")
         layout.addWidget(desc)
 
         self.result_label = QtWidgets.QLabel("Waiting for data...")
@@ -207,7 +207,7 @@ class RawDataWidget(QtWidgets.QWidget):
 
         layout.addStretch()
 
-        # Direct subscription without processor chain
+        # Direct subscription without processor graph
         self.sub = EzSubscriber(DataTopic.SENSOR_DATA, parent=self, session=session)
         self.sub.connect(self.on_data)
 

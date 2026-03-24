@@ -9,7 +9,7 @@ familiar signal/slot style while keeping ezmsg runtime ownership explicit.
 
 - `EzSession` owns the ezmsg runtime thread, `GraphContext`, and sidecar pipelines
 - `EzSubscriber` and `EzPublisher` attach to a session
-- `ProcessorChain` compiles processing stages into a sidecar runtime owned by the session
+- `ProcessorGraph` compiles processing stages into a sidecar runtime owned by the session
 
 ## Quick Start
 
@@ -89,15 +89,15 @@ class TopicSwitcher(QtWidgets.QWidget):
 
 ## Local Processing
 
-Use `ProcessorChain` when widget-facing data needs ezmsg processing off the UI thread.
+Use `ProcessorGraph` when widget-facing data needs ezmsg processing off the UI thread.
 
 ```python
-from ezmsg.qt import EzSession, ProcessorChain
+from ezmsg.qt import EzSession, ProcessorGraph
 
 session = EzSession()
 
-chain = (
-    ProcessorChain(MyTopic.RAW, parent=widget)
+graph = (
+    ProcessorGraph(MyTopic.RAW, parent=widget)
     .parallel(LowPassFilter)
     .local(ThresholdDetector)
     .connect(widget.on_processed)
@@ -136,7 +136,7 @@ with session:
 ```
 
 - `graph_address`: Optional GraphServer address
-- `attach(obj)`: Attach an `EzSubscriber`, `EzPublisher`, or `ProcessorChain`
+- `attach(obj)`: Attach an `EzSubscriber`, `EzPublisher`, or `ProcessorGraph`
 - `detach(obj)`: Detach an `EzSubscriber` or `EzPublisher`
 - `running`: Whether the session runtime is active
 

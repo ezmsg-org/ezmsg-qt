@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 import ezmsg.core as ez
 import fastplotlib as fpl
@@ -23,9 +24,10 @@ from ezmsg.util.messages.axisarray import AxisArray
 from qtpy import QtCore
 from qtpy import QtWidgets
 
-from ezmsg.qt import EzPublisher
+from ezmsg.qt import BoundProcessor
 from ezmsg.qt import EzSession
-from ezmsg.qt import EzSubscriber
+from ezmsg.qt import ProcessorGraph
+from ezmsg.qt import ProcessorSettingsPanel
 
 ClockTickType = object if AxisArray is None else AxisArray.LinearAxis
 REFERENCE_AZIMUTH_DEG = 45.0
@@ -39,10 +41,9 @@ class WindowKind(Enum):
 
 
 class CarrierTopic(Enum):
+    CLOCK_TICK = "CLOCK_TICK"
     RAW_IMAGE = "RAW_IMAGE"
     FFT_IMAGE = "FFT_IMAGE"
-    GENERATOR_SETTINGS = "GENERATOR_SETTINGS"
-    FFT_SETTINGS = "FFT_SETTINGS"
 
 
 @dataclass(frozen=True)
@@ -225,7 +226,10 @@ class SpatialCarrierGenerator(ez.Unit):
     @ez.publisher(OUTPUT_IMAGE)
     async def on_clock(self, tick: Any) -> AsyncGenerator:
         timestamp = float(getattr(tick, "offset", 0.0))
-        image = generate_spatial_carrier_frame(timestamp, self.SETTINGS)
+        image = generate_spatial_carrier_frame(
+            timestamp,
+            cast(CarrierGeneratorSettings, self.SETTINGS),
+        )
         carrier_fx, carrier_fy, curvature = reference_phase_parameters(
             reference_tilt=self.SETTINGS.reference_tilt,
             reference_distance=self.SETTINGS.reference_distance,
@@ -310,87 +314,53 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
         self._fft_settings = SpatialFFTSettings()
         self._plots_scaled = False
 
-        self.setLayout(QtWidgets.QVBoxLayout())
-        self._init_endpoints()
+        self._root_layout = QtWidgets.QVBoxLayout()
+        self.setLayout(self._root_layout)
+        self._init_pipelines()
         self._init_controls()
         self._init_graphics()
         self._init_status_row()
-        self._connect_signals()
         self._update_control_label()
-        QtCore.QTimer.singleShot(0, self._publish_all_settings)
 
-    def _init_endpoints(self) -> None:
-        self._raw_sub = EzSubscriber(
-            CarrierTopic.RAW_IMAGE,
-            parent=self,
-            session=self._session,
-            leaky=True,
-            max_queue=1,
-        )
-        self._spectrum_sub = EzSubscriber(
-            CarrierTopic.FFT_IMAGE,
-            parent=self,
-            session=self._session,
-            leaky=True,
-            max_queue=1,
-        )
-        self._generator_settings_pub = EzPublisher(
-            CarrierTopic.GENERATOR_SETTINGS, parent=self, session=self._session
-        )
-        self._fft_settings_pub = EzPublisher(
-            CarrierTopic.FFT_SETTINGS, parent=self, session=self._session
+    def _init_pipelines(self) -> None:
+        self._graph = (
+            ProcessorGraph(CarrierTopic.CLOCK_TICK, parent=self, auto_gate=True)
+            .local(
+                BoundProcessor(
+                    SpatialCarrierGenerator,
+                    name="generator",
+                    input_name="INPUT_CLOCK",
+                    output_name="OUTPUT_IMAGE",
+                )
+            )
+            .connect(self._on_raw_frame)
+            .branch(
+                lambda path: path.local(
+                    BoundProcessor(SpatialFFTProjector, name="fft")
+                ).connect(self._on_spectrum_frame)
+            )
+            .attach(self._session)
         )
 
     def _init_controls(self) -> None:
-        controls = QtWidgets.QGroupBox("Carrier Controls")
-        controls_layout = QtWidgets.QGridLayout(controls)
-
-        controls_layout.addWidget(QtWidgets.QLabel("Reference tilt"), 0, 0)
-        self._tilt_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._tilt_slider.setRange(0, 240)
-        self._tilt_slider.setValue(int(self._generator_settings.reference_tilt * 10.0))
-        controls_layout.addWidget(self._tilt_slider, 0, 1)
-
-        self._tilt_spin = QtWidgets.QDoubleSpinBox()
-        self._tilt_spin.setRange(0.0, 24.0)
-        self._tilt_spin.setDecimals(1)
-        self._tilt_spin.setSingleStep(0.1)
-        self._tilt_spin.setSuffix(" cyc/img")
-        self._tilt_spin.setValue(self._generator_settings.reference_tilt)
-        controls_layout.addWidget(self._tilt_spin, 0, 2)
-
-        controls_layout.addWidget(QtWidgets.QLabel("Reference distance"), 1, 0)
-        self._distance_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self._distance_slider.setRange(25, 400)
-        self._distance_slider.setValue(
-            int(self._generator_settings.reference_distance * 100.0)
-        )
-        controls_layout.addWidget(self._distance_slider, 1, 1)
-
-        self._distance_spin = QtWidgets.QDoubleSpinBox()
-        self._distance_spin.setRange(0.25, 4.0)
-        self._distance_spin.setDecimals(2)
-        self._distance_spin.setSingleStep(0.05)
-        self._distance_spin.setSuffix(" arb")
-        self._distance_spin.setValue(self._generator_settings.reference_distance)
-        controls_layout.addWidget(self._distance_spin, 1, 2)
-
+        controls = QtWidgets.QGroupBox("Processor Settings")
+        controls_layout = QtWidgets.QVBoxLayout(controls)
         controls_layout.addWidget(
-            QtWidgets.QLabel("Reference azimuth fixed at 45 deg"), 2, 0, 1, 3
+            QtWidgets.QLabel(
+                "Adjust generator and FFT settings, then apply each section "
+                "to update the running processor graph."
+            )
         )
 
-        controls_layout.addWidget(QtWidgets.QLabel("FFT window"), 3, 0)
-        self._window_combo = QtWidgets.QComboBox()
-        for window in WindowKind:
-            self._window_combo.addItem(window.value, window)
-        self._window_combo.setCurrentIndex(
-            self._window_combo.findData(self._fft_settings.window)
+        self._settings_panel = ProcessorSettingsPanel.from_graph(
+            self._graph,
+            parent=controls,
         )
-        controls_layout.addWidget(self._window_combo, 3, 1, 1, 2)
+        controls_layout.addWidget(self._settings_panel)
 
         self._control_label = QtWidgets.QLabel()
-        controls_layout.addWidget(self._control_label, 4, 0, 1, 3)
-        self.layout().addWidget(controls)
+        controls_layout.addWidget(self._control_label)
+        self._root_layout.addWidget(controls)
 
     def _init_graphics(self) -> None:
         self._figure = self._fpl.Figure(
@@ -406,24 +376,45 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
             ),
             dtype=np.float32,
         )
-        self._raw_graphic = self._figure[0, 0].add_image(
+        self._raw_plot = self._figure[0, 0]
+        self._fft_plot = self._figure[0, 1]
+        self._raw_graphic = self._raw_plot.add_image(
             zero_image,
             cmap="gray",
             interpolation="nearest",
             vmin=0.0,
             vmax=1.0,
         )
-        self._fft_graphic = self._figure[0, 1].add_image(
+        self._fft_graphic = self._fft_plot.add_image(
             zero_image,
             cmap="magma",
             interpolation="nearest",
             vmin=0.0,
             vmax=1.0,
         )
-        self._figure[0, 0].axes.grids.xy.visible = False
-        self._figure[0, 1].axes.grids.xy.visible = False
+        self._raw_plot.axes.grids.xy.visible = False
+        self._fft_plot.axes.grids.xy.visible = False
         self._canvas_widget = self._figure.show(maintain_aspect=True)
-        self.layout().addWidget(self._canvas_widget, stretch=1)
+        self._root_layout.addWidget(self._canvas_widget, stretch=1)
+
+    def _update_image_graphic(
+        self,
+        plot,
+        graphic_attr: str,
+        image: np.ndarray,
+        **image_kwargs: Any,
+    ) -> None:
+        graphic = getattr(self, graphic_attr)
+        contiguous = np.ascontiguousarray(image)
+
+        if graphic.data.value.shape != contiguous.shape:
+            plot.remove_graphic(graphic)
+            graphic = plot.add_image(contiguous, **image_kwargs)
+            setattr(self, graphic_attr, graphic)
+            self._plots_scaled = False
+            return
+
+        graphic.data[:] = contiguous
 
     def _init_status_row(self) -> None:
         status_layout = QtWidgets.QHBoxLayout()
@@ -431,28 +422,7 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
         self._fft_caption = QtWidgets.QLabel("Waiting for FFT frames...")
         status_layout.addWidget(self._raw_caption, stretch=1)
         status_layout.addWidget(self._fft_caption, stretch=1)
-        self.layout().addLayout(status_layout)
-
-    def _connect_signals(self) -> None:
-        self._raw_sub.connect(self._on_raw_frame)
-        self._spectrum_sub.connect(self._on_spectrum_frame)
-        self._tilt_slider.valueChanged.connect(self._on_tilt_slider_changed)
-        self._tilt_spin.valueChanged.connect(self._on_tilt_spin_changed)
-        self._distance_slider.valueChanged.connect(self._on_distance_slider_changed)
-        self._distance_spin.valueChanged.connect(self._on_distance_spin_changed)
-        self._window_combo.currentIndexChanged.connect(self._on_window_changed)
-
-    def _current_tilt(self) -> float:
-        return float(self._tilt_spin.value())
-
-    def _current_distance(self) -> float:
-        return float(self._distance_spin.value())
-
-    def _current_window(self) -> WindowKind:
-        data = self._window_combo.currentData()
-        if isinstance(data, WindowKind):
-            return data
-        return WindowKind(self._window_combo.currentText())
+        self._root_layout.addLayout(status_layout)
 
     def _update_control_label(self) -> None:
         tilt = self._generator_settings.reference_tilt
@@ -476,72 +446,47 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
             f"FFT window: {window}."
         )
 
-    def _publish_all_settings(self) -> None:
+    def _on_raw_frame(self, msg: CarrierFrame) -> None:
         self._generator_settings = CarrierGeneratorSettings(
-            image_size=self._generator_settings.image_size,
-            reference_tilt=self._current_tilt(),
-            reference_distance=self._current_distance(),
-            curvature_gain=self._generator_settings.curvature_gain,
+            image_size=int(msg.image.shape[0]),
+            reference_tilt=msg.reference_tilt,
+            reference_distance=msg.reference_distance,
+            curvature_gain=msg.curvature * msg.reference_distance,
             temporal_frequency=self._generator_settings.temporal_frequency,
         )
-        self._fft_settings = SpatialFFTSettings(window=self._current_window())
         self._update_control_label()
-        self._generator_settings_pub.emit(self._generator_settings)
-        self._fft_settings_pub.emit(self._fft_settings)
-
-    def _on_tilt_slider_changed(self, value: int) -> None:
-        tilt = value / 10.0
-        blocked = self._tilt_spin.blockSignals(True)
-        try:
-            self._tilt_spin.setValue(tilt)
-        finally:
-            self._tilt_spin.blockSignals(blocked)
-        self._publish_all_settings()
-
-    def _on_tilt_spin_changed(self, value: float) -> None:
-        blocked = self._tilt_slider.blockSignals(True)
-        try:
-            self._tilt_slider.setValue(int(round(value * 10.0)))
-        finally:
-            self._tilt_slider.blockSignals(blocked)
-        self._publish_all_settings()
-
-    def _on_distance_slider_changed(self, value: int) -> None:
-        distance = value / 100.0
-        blocked = self._distance_spin.blockSignals(True)
-        try:
-            self._distance_spin.setValue(distance)
-        finally:
-            self._distance_spin.blockSignals(blocked)
-        self._publish_all_settings()
-
-    def _on_distance_spin_changed(self, value: float) -> None:
-        blocked = self._distance_slider.blockSignals(True)
-        try:
-            self._distance_slider.setValue(int(round(value * 100.0)))
-        finally:
-            self._distance_slider.blockSignals(blocked)
-        self._publish_all_settings()
-
-    def _on_window_changed(self, index: int) -> None:
-        if index >= 0:
-            self._publish_all_settings()
-
-    def _on_raw_frame(self, msg: CarrierFrame) -> None:
-        self._raw_graphic.data[:] = np.ascontiguousarray(msg.image)
+        self._update_image_graphic(
+            self._raw_plot,
+            "_raw_graphic",
+            msg.image,
+            cmap="gray",
+            interpolation="nearest",
+            vmin=0.0,
+            vmax=1.0,
+        )
         self._raw_caption.setText(
             f"Raw: tilt {msg.reference_tilt:.1f}, "
             f"distance {msg.reference_distance:.2f}, "
             f"carrier ({msg.carrier_fx:+.2f}, {msg.carrier_fy:+.2f})"
         )
         if self._plots_scaled is False:
-            self._figure[0, 0].auto_scale()
-            self._figure[0, 1].auto_scale()
+            self._raw_plot.auto_scale()
+            self._fft_plot.auto_scale()
             self._plots_scaled = True
         self._figure.canvas.request_draw()
 
     def _on_spectrum_frame(self, msg: SpectrumFrame) -> None:
-        self._fft_graphic.data[:] = np.ascontiguousarray(msg.image)
+        self._fft_settings = SpatialFFTSettings(window=msg.window)
+        self._update_control_label()
+        self._update_image_graphic(
+            self._fft_plot,
+            "_fft_graphic",
+            msg.image,
+            cmap="magma",
+            interpolation="nearest",
+            vmin=0.0,
+            vmax=1.0,
+        )
         if abs(self._generator_settings.reference_tilt) < 1.0e-9:
             self._fft_caption.setText(
                 f"FFT: {msg.window.value}, on-axis carrier. Orders overlap near DC."
@@ -558,45 +503,22 @@ class SpatialCarrierWidget(QtWidgets.QWidget):
 def build_runner() -> GraphRunner:
     clock_cls, clock_settings_cls = _require_clock_dependencies()
 
-    class CarrierPipeline(ez.Collection):
+    class CarrierClock(ez.Collection):
         CLOCK = clock_cls()
-        GENERATOR = SpatialCarrierGenerator()
-        FFT = SpatialFFTProjector()
 
-        INPUT_GENERATOR_SETTINGS = ez.InputStream(CarrierGeneratorSettings)
-        INPUT_FFT_SETTINGS = ez.InputStream(SpatialFFTSettings)
-        OUTPUT_RAW_IMAGE = ez.OutputStream(CarrierFrame)
-        OUTPUT_FFT_IMAGE = ez.OutputStream(SpectrumFrame)
+        OUTPUT_TICK = ez.OutputStream(ClockTickType)
 
         def configure(self) -> None:
             self.CLOCK.apply_settings(clock_settings_cls(dispatch_rate=12.0))
-            self.GENERATOR.apply_settings(CarrierGeneratorSettings())
-            self.FFT.apply_settings(SpatialFFTSettings())
 
         def network(self) -> ez.NetworkDefinition:
-            return (  # pyright: ignore[reportReturnType]
-                (
-                    self.INPUT_GENERATOR_SETTINGS,
-                    self.GENERATOR.INPUT_SETTINGS,
-                ),
-                (self.INPUT_FFT_SETTINGS, self.FFT.INPUT_SETTINGS),
-                (self.CLOCK.OUTPUT_SIGNAL, self.GENERATOR.INPUT_CLOCK),
-                (self.GENERATOR.OUTPUT_IMAGE, self.OUTPUT_RAW_IMAGE),
-                (self.GENERATOR.OUTPUT_IMAGE, self.FFT.INPUT),
-                (self.FFT.OUTPUT, self.OUTPUT_FFT_IMAGE),
-            )
+            return ((self.CLOCK.OUTPUT_SIGNAL, self.OUTPUT_TICK),)
 
-    pipeline = CarrierPipeline()
+    pipeline = CarrierClock()
     return GraphRunner(
         components={"pipeline": pipeline},
         connections=[
-            (
-                CarrierTopic.GENERATOR_SETTINGS.name,
-                pipeline.INPUT_GENERATOR_SETTINGS,
-            ),
-            (CarrierTopic.FFT_SETTINGS.name, pipeline.INPUT_FFT_SETTINGS),
-            (pipeline.OUTPUT_RAW_IMAGE, CarrierTopic.RAW_IMAGE.name),
-            (pipeline.OUTPUT_FFT_IMAGE, CarrierTopic.FFT_IMAGE.name),
+            (pipeline.OUTPUT_TICK, CarrierTopic.CLOCK_TICK.name),
         ],
     )
 
