@@ -6,7 +6,7 @@ from enum import Enum
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
-from ezmsg.qt.chain import ProcessorChain
+from ezmsg.qt.chain import ProcessorGraph
 from ezmsg.qt.session import EzSession
 
 
@@ -25,22 +25,20 @@ class PassthroughProcessor(ez.Unit):
 
 
 def test_session_sets_up_visibility_filter(qtbot):
-    """Session installs visibility filter for auto_gate chains."""
+    """Session installs visibility filter for auto_gate graphs."""
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     session = EzSession()
 
     widget = QtWidgets.QWidget()
     qtbot.addWidget(widget)
 
-    # Create processor chain with widget as parent
-    chain = (
-        ProcessorChain(DemoTopic.DATA, parent=widget, auto_gate=True)
+    graph = (
+        ProcessorGraph(DemoTopic.DATA, parent=widget, auto_gate=True)
         .parallel(PassthroughProcessor)
         .connect(lambda x: None)
         .attach(session)
     )
 
-    # Chain should have parent widget set
-    assert chain.parent_widget is widget
-    assert chain.auto_gate is True
-    assert chain.session is session
+    assert graph.parent_widget is widget
+    assert graph.auto_gate is True
+    assert graph.session is session

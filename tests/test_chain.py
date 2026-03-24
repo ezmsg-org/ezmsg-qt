@@ -1,4 +1,4 @@
-"""Tests for ProcessorChain."""
+"""Tests for ProcessorGraph."""
 
 from collections.abc import AsyncGenerator
 from enum import Enum
@@ -6,18 +6,15 @@ from enum import Enum
 import ezmsg.core as ez
 
 from ezmsg.qt.chain import BoundProcessor
+from ezmsg.qt.chain import ProcessorGraph
 from ezmsg.qt.chain import _to_unit
-from ezmsg.qt.chain import ProcessorChain
 
 
 class DemoTopic(Enum):
     INPUT = "INPUT"
-    OUTPUT = "OUTPUT"
 
 
 class DoubleProcessor(ez.Unit):
-    """Test processor that doubles numeric values."""
-
     INPUT = ez.InputStream(float)
     OUTPUT = ez.OutputStream(float)
 
@@ -32,11 +29,14 @@ class DoubleSettings(ez.Settings):
 
 
 class ConfigurableDouble(ez.Unit):
-    """Test processor with configurable settings."""
-
     SETTINGS = DoubleSettings
     INPUT = ez.InputStream(float)
+    INPUT_SETTINGS = ez.InputStream(DoubleSettings)
     OUTPUT = ez.OutputStream(float)
+
+    @ez.subscriber(INPUT_SETTINGS)
+    async def on_settings(self, msg: DoubleSettings) -> None:
+        self.apply_settings(msg)
 
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)
@@ -49,144 +49,136 @@ class AsyncTransformer:
         return msg * 2
 
 
-def test_processor_chain_creation():
-    """ProcessorChain can be created with source topic."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    assert chain.source_topic == DemoTopic.INPUT
-    assert len(chain.groups) == 0
-    assert chain.auto_gate is False
-    assert chain.auto_gate_position == "input"
+def test_processor_graph_creation():
+    graph = ProcessorGraph(source_topic=DemoTopic.INPUT, parent=None)
+    assert graph.source_topic == DemoTopic.INPUT
+    assert graph.auto_gate is False
+    assert graph.auto_gate_position == "input"
+    assert graph.stages == []
+    assert graph.sinks == []
 
 
-def test_processor_chain_accepts_output_gate_position():
-    """ProcessorChain can place auto-gate after processors."""
-    chain = ProcessorChain(
-        source_topic=DemoTopic.INPUT,
-        parent=None,
-        auto_gate_position="output",
-    )
-
-    assert chain.auto_gate_position == "output"
+def test_processor_graph_accepts_output_gate_position():
+    graph = ProcessorGraph(DemoTopic.INPUT, auto_gate_position="output")
+    assert graph.auto_gate_position == "output"
 
 
-def test_processor_chain_rejects_invalid_gate_position():
-    """ProcessorChain validates gate placement values."""
+def test_processor_graph_rejects_invalid_gate_position():
     try:
-        ProcessorChain(
-            source_topic=DemoTopic.INPUT,
-            parent=None,
-            auto_gate_position="middle",  # type: ignore[arg-type]
-        )
+        ProcessorGraph(DemoTopic.INPUT, auto_gate_position="middle")  # type: ignore[arg-type]
     except ValueError as exc:
         assert "auto_gate_position" in str(exc)
     else:
-        raise AssertionError("Expected ProcessorChain to reject invalid gate position")
+        raise AssertionError("Expected ProcessorGraph to reject invalid gate position")
 
 
-def test_bound_processor_stores_stream_overrides():
-    """BoundProcessor keeps explicit input/output stream names."""
+def test_bound_processor_stores_metadata_and_stream_overrides():
     bound = BoundProcessor(
-        ConfigurableDouble, input_name="INPUT_SETTINGS", output_name="OUTPUT_STATUS"
+        ConfigurableDouble,
+        name="double",
+        input_name="INPUT_SETTINGS",
+        output_name="OUTPUT_STATUS",
     )
-
     assert bound.processor is ConfigurableDouble
+    assert bound.name == "double"
     assert bound.input_name == "INPUT_SETTINGS"
     assert bound.output_name == "OUTPUT_STATUS"
 
 
-def test_processor_chain_parallel():
-    """ProcessorChain.parallel() adds a parallel group."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    result = chain.parallel(DoubleProcessor)
-
-    assert result is chain  # Returns self for chaining
-    assert len(chain.groups) == 1
-    assert chain.groups[0].mode == "process"
-    assert len(chain.groups[0].processors) == 1
-    assert chain.groups[0].processors[0] is DoubleProcessor
+def test_processor_graph_parallel_and_local_add_stages():
+    graph = (
+        ProcessorGraph(DemoTopic.INPUT).parallel(DoubleProcessor).local(DoubleProcessor)
+    )
+    assert len(graph.stages) == 2
+    assert graph.stages[0].mode == "process"
+    assert graph.stages[1].mode == "shared"
 
 
-def test_processor_chain_local():
-    """ProcessorChain.local() adds a local group."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    result = chain.local(DoubleProcessor)
+def test_processor_graph_apply_and_branch_ignore_return_values():
+    graph = ProcessorGraph(DemoTopic.INPUT)
 
-    assert result is chain  # Returns self for chaining
-    assert len(chain.groups) == 1
-    assert chain.groups[0].mode == "shared"
+    def add_main(path):
+        path.local(BoundProcessor(DoubleProcessor, name="main"))
+        return object()
 
+    def add_branch(path):
+        path.local(BoundProcessor(ConfigurableDouble, name="branch")).connect(
+            lambda _msg: None
+        )
+        return object()
 
-def test_processor_chain_multiple_processors_in_group():
-    """Multiple processors in a single parallel/local call are grouped together."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    chain.parallel(DoubleProcessor, ConfigurableDouble)
+    graph.apply(add_main).branch(add_branch).connect(lambda _msg: None)
 
-    assert len(chain.groups) == 1
-    assert len(chain.groups[0].processors) == 2
-    assert chain.groups[0].processors[0] is DoubleProcessor
-    assert chain.groups[0].processors[1] is ConfigurableDouble
-
-
-def test_processor_chain_multiple_groups():
-    """Multiple parallel/local calls create separate groups."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    chain.parallel(DoubleProcessor).parallel(ConfigurableDouble).local(DoubleProcessor)
-
-    assert len(chain.groups) == 3
-    assert chain.groups[0].mode == "process"
-    assert chain.groups[1].mode == "process"
-    assert chain.groups[2].mode == "shared"
+    assert len(graph.stages) == 2
+    assert graph.stages[0].source_ref == "__root__"
+    assert graph.stages[1].source_ref == graph.stages[0].stage_id
+    assert len(graph.sinks) == 2
+    assert graph.sinks[0].source_ref == graph.stages[1].stage_id
+    assert graph.sinks[1].source_ref == graph.stages[0].stage_id
 
 
-def test_processor_chain_with_settings_tuple():
-    """ProcessorChain accepts (UnitClass, settings) tuples."""
-    settings = DoubleSettings(factor=3)
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    chain.parallel((ConfigurableDouble, settings))
+def test_processor_graph_connect_is_additive():
+    received_a: list[float] = []
+    received_b: list[float] = []
 
-    assert len(chain.groups) == 1
-    spec = chain.groups[0].processors[0]
-    assert isinstance(spec, tuple)
-    assert spec[0] is ConfigurableDouble
-    assert spec[1] is settings
+    graph = ProcessorGraph(DemoTopic.INPUT).local(DoubleProcessor)
+    graph.connect(received_a.append).connect(received_b.append)
+
+    assert len(graph.sinks) == 2
+    graph.sinks[0].slot(1.0)
+    graph.sinks[1].slot(2.0)
+    assert received_a == [1.0]
+    assert received_b == [2.0]
 
 
-def test_to_unit_with_class():
-    """_to_unit converts Unit class to instance."""
+def test_processor_graph_settings_bindings_after_attach():
+    from ezmsg.qt.session import EzSession
+
+    session = EzSession()
+    graph = (
+        ProcessorGraph(DemoTopic.INPUT)
+        .local(BoundProcessor(ConfigurableDouble, name="configured"), DoubleProcessor)
+        .branch(
+            lambda path: path.local(BoundProcessor(ConfigurableDouble)).connect(
+                lambda _msg: None
+            )
+        )
+        .connect(lambda _msg: None)
+        .attach(session)
+    )
+
+    bindings = graph.settings_bindings()
+    assert [binding.name for binding in bindings] == [
+        "configured",
+        "configurable_double",
+    ]
+    assert bindings[0].topic.endswith(".configured.settings")
+    assert bindings[1].topic.endswith(".configurable_double.settings")
+    assert bindings[0].initial_settings == DoubleSettings()
+
+
+def test_to_unit_with_class_and_settings_tuple():
     unit = _to_unit(DoubleProcessor)
     assert isinstance(unit, DoubleProcessor)
 
-
-def test_to_unit_with_settings_tuple():
-    """_to_unit converts (class, settings) tuple to configured instance."""
     settings = DoubleSettings(factor=5)
-    unit = _to_unit((ConfigurableDouble, settings))
-    assert isinstance(unit, ConfigurableDouble)
-    assert unit.SETTINGS.factor == 5
+    configured = _to_unit((ConfigurableDouble, settings))
+    assert isinstance(configured, ConfigurableDouble)
+    assert configured.SETTINGS.factor == 5
 
 
-def test_processor_chain_connect():
-    """ProcessorChain.connect() sets the handler."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-
-    def handler(msg):
-        pass
-
-    result = chain.connect(handler)
-    assert result is chain
-    assert chain.handler is handler
-
-
-def test_processor_chain_parallel_rejects_transformer_instances():
-    """parallel() only accepts process-safe ez.Unit-based processors."""
-    chain = ProcessorChain(source_topic=DemoTopic.INPUT, parent=None)
-    chain.parallel(AsyncTransformer()).connect(lambda _msg: None)
+def test_processor_graph_parallel_rejects_transformers():
+    graph = (
+        ProcessorGraph(DemoTopic.INPUT)
+        .parallel(AsyncTransformer())
+        .connect(lambda _msg: None)
+    )
 
     try:
-        chain._validate()
+        graph._validate()
     except TypeError as exc:
         assert "parallel() only supports" in str(exc)
     else:
         raise AssertionError(
-            "Expected ProcessorChain._validate() to reject transformer"
+            "Expected ProcessorGraph._validate() to reject transformer"
         )

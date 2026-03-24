@@ -1,41 +1,82 @@
-"""ProcessorChain - Fluent API for compiled processing pipelines."""
+"""ProcessorGraph - Fluent DAG API for compiled processing graphs."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from dataclasses import field
 from enum import Enum
+import re
 from typing import Any
 from typing import cast
 from typing import Literal
+from typing import Self
 from typing import TYPE_CHECKING
 
 import ezmsg.core as ez
-from qtpy import QtCore
 from qtpy import QtWidgets
 
 if TYPE_CHECKING:
     from .session import EzSession
 
-# Type alias for processor specifications
-# A processor can be specified as:
-# - Unit class: LowPassFilter
-# - Unit class with settings: (LowPassFilter, LowPassSettings(...))
-# - Transformer instance: MyTransformer(factor=2)
-
 
 @dataclass(frozen=True)
 class BoundProcessor:
-    """Wrap a processor spec with explicit main-path stream bindings."""
+    """Wrap a processor spec with optional metadata and stream overrides."""
 
     processor: type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | Any
+    name: str | None = None
     input_name: str | None = None
     output_name: str | None = None
+    inputs: dict[str, Enum | str] | None = None
 
 
 ProcessorSpec = type[ez.Unit] | tuple[type[ez.Unit], ez.Settings] | BoundProcessor | Any
 AutoGatePosition = Literal["input", "output"]
+GraphRecipe = Callable[["ProcessorPath"], Any]
+
+_ROOT_REF = "__root__"
+
+
+@dataclass(frozen=True)
+class ProcessorSettingsBinding:
+    """Runtime settings metadata for a processor in the graph."""
+
+    name: str
+    title: str
+    node_id: str
+    processor_index: int
+    settings_type: type[Any]
+    topic: str
+    initial_settings: Any | None
+
+
+@dataclass(frozen=True)
+class ProcessorInputBinding:
+    """Bind a public topic to a named processor input stream."""
+
+    node_id: str
+    processor_index: int
+    input_name: str
+    topic: str
+
+
+@dataclass(frozen=True)
+class ProcessorStage:
+    """A linear group of processors sourced from an upstream tail."""
+
+    stage_id: str
+    source_ref: str
+    processors: tuple[ProcessorSpec, ...]
+    mode: Literal["shared", "process"]
+
+
+@dataclass(frozen=True)
+class GraphSink:
+    """A Qt-facing observer attached to a tail in the graph."""
+
+    sink_id: str
+    source_ref: str
+    slot: Callable[[Any], None]
 
 
 def _is_process_safe(spec: ProcessorSpec) -> bool:
@@ -50,98 +91,67 @@ def _is_process_safe(spec: ProcessorSpec) -> bool:
 
 
 def _to_unit(spec: ProcessorSpec) -> ez.Unit:
-    """Convert a ProcessorSpec to an ez.Unit instance.
-
-    Args:
-        spec: A Unit instance, Unit class, (class, settings) tuple,
-            or transformer instance.
-
-    Returns:
-        An instantiated ez.Unit ready for use.
-
-    Raises:
-        TypeError: If spec is not a recognized processor type.
-    """
     if isinstance(spec, BoundProcessor):
         spec = spec.processor
 
     if isinstance(spec, ez.Unit):
-        # Already instantiated unit (settings already applied)
         return spec
-    elif isinstance(spec, tuple):
-        # (UnitClass, settings) tuple
+    if isinstance(spec, tuple):
         unit_class, settings = spec
         unit = unit_class()
         unit.apply_settings(settings)
         return unit
-    elif isinstance(spec, type) and issubclass(spec, ez.Unit):
-        # Unit class without settings
+    if isinstance(spec, type) and issubclass(spec, ez.Unit):
         return spec()
-    elif hasattr(spec, "__acall__"):
-        # BaseProcessor instance (has async call method)
+    if hasattr(spec, "__acall__"):
         from .adapter import TransformerAdapter
 
         return TransformerAdapter(spec)
-    else:
-        raise TypeError(
-            f"Expected Unit class, (class, settings) tuple, or processor instance "
-            f"with __acall__, got {type(spec)}"
-        )
+    raise TypeError(
+        f"Expected Unit class, (class, settings) tuple, or processor instance "
+        f"with __acall__, got {type(spec)}"
+    )
 
 
-@dataclass
-class ProcessorGroup:
-    """A group of processors that run together in the same execution context."""
+class ProcessorPath:
+    """Mutable builder for a path in a processor graph."""
 
-    processors: list[ProcessorSpec] = field(default_factory=list)
-    mode: Literal["shared", "process"] = "shared"
+    def __init__(self, graph: ProcessorGraph, tail_ref: str):
+        self._graph = graph
+        self._tail_ref = tail_ref
+
+    @property
+    def graph(self) -> ProcessorGraph:
+        return self._graph
+
+    @property
+    def tail_ref(self) -> str:
+        return self._tail_ref
+
+    def parallel(self, *processors: ProcessorSpec) -> Self:
+        self._tail_ref = self._graph._add_stage(self._tail_ref, processors, "process")
+        return self
+
+    def local(self, *processors: ProcessorSpec) -> Self:
+        self._tail_ref = self._graph._add_stage(self._tail_ref, processors, "shared")
+        return self
+
+    def connect(self, slot: Callable[[Any], None]) -> Self:
+        self._graph._add_sink(self._tail_ref, slot)
+        return self
+
+    def apply(self, recipe: GraphRecipe) -> Self:
+        recipe(self)
+        return self
+
+    def branch(self, recipe: GraphRecipe) -> Self:
+        branch_path = ProcessorPath(self._graph, self._tail_ref)
+        recipe(branch_path)
+        return self
 
 
-@dataclass(frozen=True)
-class ExternalInputBinding:
-    """Bind a public ezmsg topic to an internal processor input stream."""
-
-    topic: Enum | str
-    group_index: int
-    processor_index: int
-    input_name: str
-
-
-class ProcessorChain:
-    """
-    Fluent builder for processor chains.
-
-    ProcessorChain accumulates processor groups that will be executed
-    in sequence inside a sidecar ezmsg runtime owned by :class:`EzSession`.
-
-    - ``parallel()`` runs a group in its own sidecar process.
-    - ``local()`` runs a group in the shared sidecar process.
-
-    Neither mode runs work on the Qt UI thread.
-
-        Example:
-            # Using Unit classes
-            chain = (
-                ProcessorChain(Topic.RAW, parent=widget, auto_gate=True)
-                .parallel(LowPassFilter, ScaleProcessor)
-                .local(ThresholdDetector)
-                .connect(widget.on_data)
-            )
-
-            # Using Unit classes with settings
-            chain = (
-                ProcessorChain(Topic.RAW, parent=widget, auto_gate=True)
-                .parallel((LowPassFilter, LowPassSettings(alpha=0.5)))
-                .connect(widget.on_data)
-            )
-
-            # Using transformer instances
-            chain = (
-                ProcessorChain(Topic.RAW, parent=widget, auto_gate=True)
-                .parallel(LowPassFilter(), ScaleProcessor(factor=2))
-                .connect(widget.on_data)
-            )
-    """
+class ProcessorGraph(ProcessorPath):
+    """Fluent builder for Qt-facing processor graphs."""
 
     def __init__(
         self,
@@ -150,202 +160,254 @@ class ProcessorChain:
         auto_gate: bool = False,
         auto_gate_position: AutoGatePosition = "input",
     ):
-        """Create a processor chain.
-
-        Args:
-            source_topic: The topic name to subscribe to.
-            parent: Optional parent widget for auto-gating.
-            auto_gate: If True, gate based on parent widget visibility.
-            auto_gate_position: Place the gate before processors ("input") or
-                after processors ("output").
-        """
         if auto_gate_position not in ("input", "output"):
             raise ValueError("auto_gate_position must be 'input' or 'output'")
-        validated_auto_gate_position = cast(AutoGatePosition, auto_gate_position)
-
         self._source_topic = source_topic
         self._parent_widget = parent
         self._auto_gate = auto_gate
-        self._auto_gate_position: AutoGatePosition = validated_auto_gate_position
-        self._groups: list[ProcessorGroup] = []
-        self._external_inputs: list[ExternalInputBinding] = []
-        self._handler: Callable[[Any], None] | None = None
-        self._chain_id: str | None = None
+        self._auto_gate_position: AutoGatePosition = cast(
+            AutoGatePosition, auto_gate_position
+        )
+        self._stages: list[ProcessorStage] = []
+        self._sinks: list[GraphSink] = []
+        self._stage_counter = 0
+        self._sink_counter = 0
+        self._graph_id: str | None = None
         self._session: EzSession | None = None
         self._attached = False
         self._visibility_filter: Any | None = None
+        super().__init__(self, _ROOT_REF)
 
     @property
     def source_topic(self) -> Enum | str:
-        """The source topic this chain subscribes to."""
         return self._source_topic
 
     @property
-    def groups(self) -> list[ProcessorGroup]:
-        """The processor groups in this chain."""
-        return self._groups
-
-    @property
     def parent_widget(self) -> QtWidgets.QWidget | None:
-        """The parent widget for auto-gating."""
         return self._parent_widget
 
     @property
     def auto_gate(self) -> bool:
-        """Whether auto-gating based on visibility is enabled."""
         return self._auto_gate
 
     @property
     def auto_gate_position(self) -> AutoGatePosition:
-        """Whether the gate sits at the chain input or output."""
         return self._auto_gate_position
 
     @property
-    def handler(self) -> Callable[[Any], None] | None:
-        """The Qt handler connected to this chain's output."""
-        return self._handler
+    def stages(self) -> list[ProcessorStage]:
+        return self._stages
 
     @property
-    def external_inputs(self) -> list[ExternalInputBinding]:
-        """External topic bindings into specific processor input streams."""
-        return self._external_inputs
-
-    def parallel(self, *processors: ProcessorSpec) -> ProcessorChain:
-        """Add processors to run in an isolated sidecar process.
-
-        Multiple processors passed to a single parallel() call will be
-        grouped together in the same process.
-
-        Args:
-            *processors: Unit classes, (class, settings) tuples, or
-                ez.Unit instances.
-
-        Returns:
-            Self for method chaining.
-
-        Example:
-            chain.parallel(LowPassFilter, ScaleProcessor)  # same process
-            chain.parallel(FFT)  # different process
-
-        Note:
-            ``parallel()`` only supports ez.Unit-based processors. Transformer
-            instances with ``__acall__`` are only supported by ``local()``.
-        """
-        self._groups.append(ProcessorGroup(processors=list(processors), mode="process"))
-        return self
-
-    def local(self, *processors: ProcessorSpec) -> ProcessorChain:
-        """Add processors to run in the shared sidecar process.
-
-        Multiple processors passed to a single local() call will be
-        grouped together.
-
-        Args:
-            *processors: Unit classes, (class, settings) tuples, or
-                transformer instances.
-
-        Returns:
-            Self for method chaining.
-
-        Example:
-            chain.local(ThresholdDetector)  # runs in shared sidecar process
-        """
-        self._groups.append(ProcessorGroup(processors=list(processors), mode="shared"))
-        return self
-
-    def connect(self, slot: Callable[[Any], None]) -> ProcessorChain:
-        """Connect the chain output to a Qt handler.
-
-        This finalizes the chain configuration. The handler will be
-        called with each processed message.
-
-        Args:
-            slot: A callable that receives processed messages.
-        """
-        self._handler = slot
-        return self
-
-    def bind_input(
-        self,
-        topic: Enum | str,
-        *,
-        group_index: int = -1,
-        processor_index: int = 0,
-        input_name: str = "INPUT_SETTINGS",
-    ) -> ProcessorChain:
-        """Bind a public topic to an internal processor input stream.
-
-        This is primarily useful for runtime settings updates, e.g. wiring a
-        ``*.settings`` topic into a processor group's ``INPUT_SETTINGS`` stream.
-        Negative indices follow standard Python indexing rules.
-        """
-
-        self._external_inputs.append(
-            ExternalInputBinding(
-                topic=topic,
-                group_index=group_index,
-                processor_index=processor_index,
-                input_name=input_name,
-            )
-        )
-        return self
+    def sinks(self) -> list[GraphSink]:
+        return self._sinks
 
     @property
     def session(self) -> EzSession | None:
-        """The session this pipeline is attached to, if any."""
         return self._session
 
     @property
     def attached(self) -> bool:
-        """Whether this pipeline has been attached to a session."""
         return self._attached
 
-    def attach(self, session: EzSession) -> ProcessorChain:
-        """Attach this pipeline to a session.
-
-        The pipeline must be fully configured before attachment.
-        """
+    def attach(self, session: EzSession) -> ProcessorGraph:
         session.attach(self)
         return self
+
+    def settings_bindings(self) -> list[ProcessorSettingsBinding]:
+        if self._session is None or self._graph_id is None:
+            raise RuntimeError(
+                "ProcessorGraph must be attached to a session before reading settings bindings"
+            )
+        return self._collect_settings_bindings(self._session._topic_prefix)
+
+    def input_bindings(self) -> list[ProcessorInputBinding]:
+        if self._session is None or self._graph_id is None:
+            raise RuntimeError(
+                "ProcessorGraph must be attached to a session before reading input bindings"
+            )
+        return self._collect_input_bindings(self._session._topic_prefix)
+
+    def _add_stage(
+        self,
+        source_ref: str,
+        processors: tuple[ProcessorSpec, ...],
+        mode: Literal["shared", "process"],
+    ) -> str:
+        stage_id = f"stage_{self._stage_counter}"
+        self._stage_counter += 1
+        self._stages.append(
+            ProcessorStage(
+                stage_id=stage_id,
+                source_ref=source_ref,
+                processors=processors,
+                mode=mode,
+            )
+        )
+        return stage_id
+
+    def _add_sink(self, source_ref: str, slot: Callable[[Any], None]) -> None:
+        sink_id = f"sink_{self._sink_counter}"
+        self._sink_counter += 1
+        self._sinks.append(GraphSink(sink_id=sink_id, source_ref=source_ref, slot=slot))
 
     def _bind_session(self, session: EzSession) -> None:
         if self._session is not None and self._session is not session:
             raise RuntimeError(
-                "ProcessorChain is already attached to a different session"
+                "ProcessorGraph is already attached to a different session"
             )
         self._session = session
         self._attached = True
 
     def _validate(self) -> None:
-        if not self._groups:
-            raise ValueError("ProcessorChain must define at least one processor group")
-        if self._handler is None:
-            raise ValueError("ProcessorChain must connect a handler before attachment")
-        for group in self._groups:
-            if group.mode != "process":
-                continue
-            for spec in group.processors:
-                if not _is_process_safe(spec):
-                    raise TypeError(
-                        "parallel() only supports ez.Unit classes, ez.Unit instances, "
-                        "or (UnitClass, Settings) tuples"
+        if not self._stages:
+            raise ValueError("ProcessorGraph must define at least one processor stage")
+        if not self._sinks:
+            raise ValueError("ProcessorGraph must connect at least one handler")
+
+        known_refs = {_ROOT_REF}
+        for stage in self._stages:
+            if stage.source_ref not in known_refs:
+                raise ValueError(f"Unknown graph source reference: {stage.source_ref}")
+            if stage.mode == "process":
+                for spec in stage.processors:
+                    if not _is_process_safe(spec):
+                        raise TypeError(
+                            "parallel() only supports ez.Unit classes, ez.Unit instances, "
+                            "or (UnitClass, Settings) tuples"
+                        )
+            known_refs.add(stage.stage_id)
+
+        for sink in self._sinks:
+            if sink.source_ref not in known_refs:
+                raise ValueError(
+                    f"Unknown graph sink source reference: {sink.source_ref}"
+                )
+
+    def _collect_settings_bindings(
+        self,
+        topic_prefix: str,
+    ) -> list[ProcessorSettingsBinding]:
+        counts: dict[str, int] = {}
+        bindings: list[ProcessorSettingsBinding] = []
+
+        for stage in self._stages:
+            for processor_index, spec in enumerate(stage.processors):
+                unit = _to_unit(spec)
+                unit_class = type(unit)
+                settings_type = getattr(unit_class, "SETTINGS", None)
+                if not isinstance(settings_type, type) or not hasattr(
+                    unit_class, "INPUT_SETTINGS"
+                ):
+                    continue
+
+                base_name = _spec_name(spec)
+                occurrence = counts.get(base_name, 0) + 1
+                counts[base_name] = occurrence
+                name = base_name if occurrence == 1 else f"{base_name}_{occurrence}"
+                graph_id = self._graph_id if self._graph_id is not None else "graph"
+                topic = f"{topic_prefix}.{graph_id}.{name}.settings"
+                bindings.append(
+                    ProcessorSettingsBinding(
+                        name=name,
+                        title=_spec_title(spec, occurrence),
+                        node_id=stage.stage_id,
+                        processor_index=processor_index,
+                        settings_type=settings_type,
+                        topic=topic,
+                        initial_settings=_initial_settings(unit, settings_type),
+                    )
+                )
+
+        return bindings
+
+    def _collect_input_bindings(
+        self,
+        topic_prefix: str,
+    ) -> list[ProcessorInputBinding]:
+        bindings: list[ProcessorInputBinding] = []
+
+        for stage in self._stages:
+            for processor_index, spec in enumerate(stage.processors):
+                _inner, bound = _unwrap_bound_processor(spec)
+                if bound is None or not bound.inputs:
+                    continue
+
+                for input_name, topic in bound.inputs.items():
+                    bindings.append(
+                        ProcessorInputBinding(
+                            node_id=stage.stage_id,
+                            processor_index=processor_index,
+                            input_name=input_name,
+                            topic=normalize_topic(topic),
+                        )
                     )
 
-        for binding in self._external_inputs:
-            group_index = binding.group_index
-            if group_index < 0:
-                group_index += len(self._groups)
-            if group_index < 0 or group_index >= len(self._groups):
-                raise IndexError(
-                    f"External input binding group index out of range: {binding.group_index}"
-                )
+        return bindings
 
-            processors = self._groups[group_index].processors
-            processor_index = binding.processor_index
-            if processor_index < 0:
-                processor_index += len(processors)
-            if processor_index < 0 or processor_index >= len(processors):
-                raise IndexError(
-                    "External input binding processor index out of range: "
-                    f"{binding.processor_index}"
-                )
+
+def _unwrap_bound_processor(
+    spec: ProcessorSpec,
+) -> tuple[ProcessorSpec, BoundProcessor | None]:
+    if isinstance(spec, BoundProcessor):
+        return spec.processor, spec
+    return spec, None
+
+
+def _spec_name(spec: ProcessorSpec) -> str:
+    inner, bound = _unwrap_bound_processor(spec)
+    if bound is not None and bound.name:
+        return bound.name
+
+    if isinstance(inner, tuple):
+        unit_class, _settings = inner
+        name = unit_class.__name__
+    elif isinstance(inner, ez.Unit):
+        name = type(inner).__name__
+    elif isinstance(inner, type):
+        name = inner.__name__
+    else:
+        name = type(inner).__name__
+
+    return _to_snake_case(name)
+
+
+def _spec_title(spec: ProcessorSpec, occurrence: int) -> str:
+    inner, bound = _unwrap_bound_processor(spec)
+    if bound is not None and bound.name:
+        return bound.name
+
+    if isinstance(inner, tuple):
+        unit_class, _settings = inner
+        base = unit_class.__name__
+    elif isinstance(inner, ez.Unit):
+        base = type(inner).__name__
+    elif isinstance(inner, type):
+        base = inner.__name__
+    else:
+        base = type(inner).__name__
+
+    return base if occurrence == 1 else f"{base} {occurrence}"
+
+
+def _to_snake_case(name: str) -> str:
+    first = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", first).lower()
+
+
+def _initial_settings(unit: ez.Unit, settings_type: type[Any]) -> Any | None:
+    current = getattr(unit, "SETTINGS", None)
+    if isinstance(current, settings_type):
+        return current
+    try:
+        return settings_type()
+    except Exception:
+        return None
+
+
+def normalize_topic(topic: str | Enum) -> str:
+    if isinstance(topic, Enum):
+        return topic.name
+    if isinstance(topic, str):
+        return topic
+    raise TypeError(f"Unsupported topic type: {type(topic)!r}")

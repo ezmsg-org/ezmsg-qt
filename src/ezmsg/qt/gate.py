@@ -1,4 +1,4 @@
-"""Gate unit for controlling message flow in processor chains."""
+"""Gate unit for controlling message flow in processor graphs."""
 
 import logging
 from collections.abc import AsyncGenerator

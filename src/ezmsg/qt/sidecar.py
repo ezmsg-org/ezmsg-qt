@@ -1,4 +1,4 @@
-"""Sidecar runtime compilation for processor pipelines."""
+"""Sidecar runtime compilation for processor graphs."""
 
 from __future__ import annotations
 
@@ -11,26 +11,29 @@ from typing import TYPE_CHECKING
 import ezmsg.core as ez
 from ezmsg.core.collection import NetworkDefinition
 
+from .chain import _ROOT_REF
 from .chain import _to_unit
+from .chain import GraphSink
+from .chain import ProcessorGraph
+from .chain import ProcessorInputBinding
+from .chain import ProcessorSettingsBinding
+from .chain import ProcessorStage
 from .gate import MessageGate
 from .gate import MessageGateSettings
 
 if TYPE_CHECKING:
-    from .chain import ProcessorChain
+    from collections.abc import Callable
 
 
 _INPUT_STREAM_NAMES = ("INPUT_SIGNAL", "INPUT")
 _OUTPUT_STREAM_NAMES = ("OUTPUT_SIGNAL", "OUTPUT")
 
 _stream_module = import_module("ezmsg.core.stream")
-# TODO: Drop this fallback once a released ezmsg package exposes InputTopic /
-# OutputTopic consistently at runtime.
 _INPUT_BOUNDARY = getattr(_stream_module, "InputTopic", ez.InputStream)
 _OUTPUT_BOUNDARY = getattr(_stream_module, "OutputTopic", ez.OutputStream)
 
 
 def normalize_topic(topic: str | Enum) -> str:
-    """Normalize public topic inputs to ezmsg core semantics."""
     if isinstance(topic, Enum):
         return topic.name
     if isinstance(topic, str):
@@ -38,38 +41,28 @@ def normalize_topic(topic: str | Enum) -> str:
     raise TypeError(f"Unsupported topic type: {type(topic)!r}")
 
 
-def _detect_stream_names(unit: ez.Unit) -> tuple[str, str]:
+def _detect_stream_name(
+    unit: ez.Unit,
+    candidates: tuple[str, ...],
+    kind: str,
+) -> str:
     unit_class = type(unit)
-
-    input_name = next(
-        (name for name in _INPUT_STREAM_NAMES if hasattr(unit_class, name)), None
-    )
-    output_name = next(
-        (name for name in _OUTPUT_STREAM_NAMES if hasattr(unit_class, name)),
-        None,
-    )
-
-    if input_name is None:
+    stream_name = next((name for name in candidates if hasattr(unit_class, name)), None)
+    if stream_name is None:
         raise ValueError(
-            f"Unit {unit_class.__name__} has no recognized input stream. "
-            f"Expected one of: {_INPUT_STREAM_NAMES}"
+            f"Unit {unit_class.__name__} has no recognized {kind} stream. "
+            f"Expected one of: {candidates}"
         )
-    if output_name is None:
-        raise ValueError(
-            f"Unit {unit_class.__name__} has no recognized output stream. "
-            f"Expected one of: {_OUTPUT_STREAM_NAMES}"
-        )
-
-    return input_name, output_name
+    return stream_name
 
 
-class ProcessorGroupCollection(ez.Collection):
-    """Collection wrapper for a processor group."""
+class ProcessorStageCollection(ez.Collection):
+    """Collection wrapper for a linear processor stage."""
 
     INPUT = _INPUT_BOUNDARY(Any)
     OUTPUT = _OUTPUT_BOUNDARY(Any)
 
-    def __init__(self, processors: list[Any]):
+    def __init__(self, processors: tuple[Any, ...]):
         super().__init__()
         self._ordered_processors: list[tuple[str, ez.Unit, str | None, str | None]] = []
 
@@ -88,12 +81,16 @@ class ProcessorGroupCollection(ez.Collection):
         previous: Any = self.INPUT
 
         for _name, unit, input_override, output_override in self._ordered_processors:
-            input_name, output_name = _detect_stream_names(unit)
-            if input_override is not None:
-                input_name = input_override
-            if output_override is not None:
-                output_name = output_override
-
+            input_name = input_override or _detect_stream_name(
+                unit,
+                _INPUT_STREAM_NAMES,
+                "input",
+            )
+            output_name = output_override or _detect_stream_name(
+                unit,
+                _OUTPUT_STREAM_NAMES,
+                "output",
+            )
             edges.append((previous, getattr(unit, input_name)))
             previous = getattr(unit, output_name)
 
@@ -105,93 +102,119 @@ class ProcessorGroupCollection(ez.Collection):
 
 
 @dataclass(frozen=True)
-class CompiledPipeline:
-    """Session-facing metadata for a compiled pipeline."""
+class CompiledSink:
+    sink_id: str
+    topic: str
+    slot: Callable[[Any], None]
+    gate_component_name: str | None = None
 
-    chain: ProcessorChain
-    gate_component_name: str
-    group_component_names: tuple[str, ...]
+
+@dataclass(frozen=True)
+class CompiledGraph:
+    graph: ProcessorGraph
+    gate_component_name: str | None
+    stage_component_names: tuple[str, ...]
     source_topic: str
-    output_topic: str
-    gate_topic: str
+    gate_topic: str | None
+    sinks: tuple[CompiledSink, ...]
+    settings_bindings: tuple[ProcessorSettingsBinding, ...] = ()
+    input_bindings: tuple[ProcessorInputBinding, ...] = ()
 
 
 def build_sidecar_components(
-    chains: list[ProcessorChain],
+    graphs: list[ProcessorGraph],
     topic_prefix: str = "_qt",
 ) -> tuple[
     dict[str, ez.Component],
     list[tuple[Any, Any]],
     tuple[ez.Component, ...],
-    list[CompiledPipeline],
+    list[CompiledGraph],
 ]:
-    """Compile pipelines into a sidecar GraphRunner definition."""
     components: dict[str, ez.Component] = {}
     connections: list[tuple[Any, Any]] = []
     process_components: list[ez.Component] = []
-    compiled: list[CompiledPipeline] = []
+    compiled: list[CompiledGraph] = []
 
-    for index, chain in enumerate(chains):
-        chain._validate()
-        chain_id = chain._chain_id or f"chain_{index}"
-        gate_name = f"{chain_id}_gate"
-        output_topic = f"{topic_prefix}.{chain_id}.out"
-        gate_topic = f"{topic_prefix}.{chain_id}.gate"
-        source_topic = normalize_topic(chain.source_topic)
+    for index, graph in enumerate(graphs):
+        graph._validate()
+        graph_id = graph._graph_id or f"graph_{index}"
+        source_topic = normalize_topic(graph.source_topic)
+        settings_bindings = graph._collect_settings_bindings(topic_prefix)
+        input_bindings = graph._collect_input_bindings(topic_prefix)
+        gate_topic = f"{topic_prefix}.{graph_id}.gate" if graph.auto_gate else None
 
-        gate = MessageGate(MessageGateSettings(start_open=True))
-        components[gate_name] = gate
+        ref_endpoints: dict[str, Any] = {_ROOT_REF: source_topic}
+        stage_names: list[str] = []
 
-        connections.extend(
-            [
-                (gate_topic, f"{gate_name}/INPUT_GATE"),
-            ]
-        )
+        root_gate_name: str | None = None
+        if graph.auto_gate and graph.auto_gate_position == "input":
+            root_gate_name = f"{graph_id}_gate"
+            components[root_gate_name] = MessageGate(
+                MessageGateSettings(start_open=True)
+            )
+            assert gate_topic is not None
+            connections.append((gate_topic, f"{root_gate_name}/INPUT_GATE"))
+            connections.append((source_topic, f"{root_gate_name}/INPUT"))
+            ref_endpoints[_ROOT_REF] = f"{root_gate_name}/OUTPUT"
 
-        if chain.auto_gate_position == "input":
-            connections.append((source_topic, f"{gate_name}/INPUT"))
-            previous: Any = f"{gate_name}/OUTPUT"
-        else:
-            previous = source_topic
-
-        group_names: list[str] = []
-
-        for group_index, group in enumerate(chain.groups):
-            group_name = f"{chain_id}_group_{group_index}"
-            collection = ProcessorGroupCollection(group.processors)
-            components[group_name] = collection
-            connections.append((previous, f"{group_name}/INPUT"))
-            previous = f"{group_name}/OUTPUT"
-            group_names.append(group_name)
-
-            if group.mode == "process":
+        for stage in graph.stages:
+            stage_name = f"{graph_id}_{stage.stage_id}"
+            collection = ProcessorStageCollection(stage.processors)
+            components[stage_name] = collection
+            stage_names.append(stage_name)
+            connections.append((ref_endpoints[stage.source_ref], f"{stage_name}/INPUT"))
+            ref_endpoints[stage.stage_id] = f"{stage_name}/OUTPUT"
+            if stage.mode == "process":
                 process_components.append(collection)
 
-        if chain.auto_gate_position == "output":
-            connections.append((previous, f"{gate_name}/INPUT"))
-            previous = f"{gate_name}/OUTPUT"
+        for binding in settings_bindings:
+            stage_name = f"{graph_id}_{binding.node_id}"
+            target = f"{stage_name}/proc_{binding.processor_index}/INPUT_SETTINGS"
+            connections.append((binding.topic, target))
 
-        for binding in chain.external_inputs:
-            group_index = binding.group_index
-            if group_index < 0:
-                group_index += len(group_names)
-            processor_index = binding.processor_index
-            if processor_index < 0:
-                processor_index += len(chain.groups[group_index].processors)
+        for binding in input_bindings:
+            stage_name = f"{graph_id}_{binding.node_id}"
+            target = f"{stage_name}/proc_{binding.processor_index}/{binding.input_name}"
+            connections.append((binding.topic, target))
 
-            target = f"{group_names[group_index]}/proc_{processor_index}/{binding.input_name}"
-            connections.append((normalize_topic(binding.topic), target))
+        sink_bindings: list[CompiledSink] = []
+        for sink in graph.sinks:
+            sink_topic = f"{topic_prefix}.{graph_id}.{sink.sink_id}.out"
+            sink_gate_name: str | None = None
 
-        connections.append((previous, output_topic))
+            if graph.auto_gate and graph.auto_gate_position == "output":
+                sink_gate_name = f"{graph_id}_{sink.sink_id}_gate"
+                components[sink_gate_name] = MessageGate(
+                    MessageGateSettings(start_open=True)
+                )
+                assert gate_topic is not None
+                connections.append((gate_topic, f"{sink_gate_name}/INPUT_GATE"))
+                connections.append(
+                    (ref_endpoints[sink.source_ref], f"{sink_gate_name}/INPUT")
+                )
+                connections.append((f"{sink_gate_name}/OUTPUT", sink_topic))
+            else:
+                connections.append((ref_endpoints[sink.source_ref], sink_topic))
+
+            sink_bindings.append(
+                CompiledSink(
+                    sink_id=sink.sink_id,
+                    topic=sink_topic,
+                    slot=sink.slot,
+                    gate_component_name=sink_gate_name,
+                )
+            )
 
         compiled.append(
-            CompiledPipeline(
-                chain=chain,
-                gate_component_name=gate_name,
-                group_component_names=tuple(group_names),
+            CompiledGraph(
+                graph=graph,
+                gate_component_name=root_gate_name,
+                stage_component_names=tuple(stage_names),
                 source_topic=source_topic,
-                output_topic=output_topic,
                 gate_topic=gate_topic,
+                sinks=tuple(sink_bindings),
+                settings_bindings=tuple(settings_bindings),
+                input_bindings=tuple(input_bindings),
             )
         )
 

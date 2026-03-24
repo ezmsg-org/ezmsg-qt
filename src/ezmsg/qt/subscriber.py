@@ -29,7 +29,7 @@ class EzSubscriber(QtCore.QObject):
     Messages are delivered via a Qt signal, allowing seamless integration with
     Qt's event loop and signal/slot mechanism.
 
-    For processing chains, use ProcessorChain directly instead.
+    For processing graphs, use ProcessorGraph directly instead.
 
     Example:
         class MyWidget(QtWidgets.QWidget):
