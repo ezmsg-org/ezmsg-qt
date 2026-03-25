@@ -70,3 +70,6 @@ force-single-line = true
 order-by-type = false
 known-first-party = ["ezmsg.qt"]
 known-third-party = ["ezmsg"]
+
+[tool.uv.sources]
+fastplotlib = { git = "https://github.com/pperanich/fastplotlib.git", rev = "feature/multi-line-graphic" }
