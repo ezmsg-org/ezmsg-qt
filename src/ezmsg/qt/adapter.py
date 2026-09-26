@@ -12,7 +12,7 @@ class TransformerAdapter(ez.Unit):
     """Wraps a BaseProcessor instance as an ez.Unit.
 
     This adapter allows ezmsg-baseproc processors (BaseTransformer, etc.)
-    to be used in ProcessorChain alongside native ez.Unit classes.
+    to be used in ProcessorGraph alongside native ez.Unit classes.
 
     Mirrors key features of BaseTransformerUnit:
     - zero_copy=True for performance with large messages

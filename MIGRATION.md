@@ -58,11 +58,11 @@ Notes:
 
 ## Processor Pipelines
 
-`ProcessorChain` attaches to a session and always runs off the UI thread.
+`ProcessorGraph` attaches to a session and always runs off the UI thread.
 
 ```python
-chain = (
-    ProcessorChain(MyTopic.RAW, parent=self)
+graph = (
+    ProcessorGraph(MyTopic.RAW, parent=self)
     .parallel(Filter)
     .local(DisplayTransform)
     .connect(self.on_data)

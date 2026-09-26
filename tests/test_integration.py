@@ -1,4 +1,4 @@
-"""Integration tests for processor chains."""
+"""Integration tests for processor graphs."""
 
 from collections.abc import AsyncGenerator
 from enum import Enum
@@ -30,7 +30,17 @@ class AddOneProcessor(ez.Unit):
         yield self.OUTPUT, msg + 1
 
 
-def _run_chain(qtbot, chain_builder, expected: list[float]) -> list[float]:
+class HalfProcessor(ez.Unit):
+    INPUT = ez.InputStream(float)
+    OUTPUT = ez.OutputStream(float)
+
+    @ez.subscriber(INPUT)
+    @ez.publisher(OUTPUT)
+    async def process(self, msg: float) -> AsyncGenerator:
+        yield self.OUTPUT, msg / 2.0
+
+
+def _run_graph(qtbot, graph_builder, expected: list[float]) -> list[float]:
     from qtpy import QtWidgets
 
     from ezmsg.qt import EzPublisher
@@ -44,7 +54,7 @@ def _run_chain(qtbot, chain_builder, expected: list[float]) -> list[float]:
     qtbot.addWidget(widget)
 
     pub = EzPublisher(DemoTopic.INPUT, parent=widget, session=session)
-    chain_builder(widget, session, results)
+    graph_builder(widget, session, results)
 
     with session:
         qtbot.wait(250)
@@ -57,13 +67,13 @@ def _run_chain(qtbot, chain_builder, expected: list[float]) -> list[float]:
     return results
 
 
-def test_local_chain_integration(qtbot):
-    from ezmsg.qt import ProcessorChain
+def test_local_graph_integration(qtbot):
+    from ezmsg.qt import ProcessorGraph
 
-    results = _run_chain(
+    results = _run_graph(
         qtbot,
         lambda widget, session, results: (
-            ProcessorChain(DemoTopic.INPUT, parent=widget, auto_gate=False)
+            ProcessorGraph(DemoTopic.INPUT, parent=widget, auto_gate=False)
             .local(AddOneProcessor)
             .connect(results.append)
             .attach(session)
@@ -75,13 +85,13 @@ def test_local_chain_integration(qtbot):
     assert 11.0 in results
 
 
-def test_parallel_chain_integration(qtbot):
-    from ezmsg.qt import ProcessorChain
+def test_parallel_graph_integration(qtbot):
+    from ezmsg.qt import ProcessorGraph
 
-    results = _run_chain(
+    results = _run_graph(
         qtbot,
         lambda widget, session, results: (
-            ProcessorChain(DemoTopic.INPUT, parent=widget, auto_gate=False)
+            ProcessorGraph(DemoTopic.INPUT, parent=widget, auto_gate=False)
             .parallel(DoubleProcessor)
             .connect(results.append)
             .attach(session)
@@ -93,13 +103,13 @@ def test_parallel_chain_integration(qtbot):
     assert 20.0 in results
 
 
-def test_mixed_chain_integration(qtbot):
-    from ezmsg.qt import ProcessorChain
+def test_mixed_graph_integration(qtbot):
+    from ezmsg.qt import ProcessorGraph
 
-    results = _run_chain(
+    results = _run_graph(
         qtbot,
         lambda widget, session, results: (
-            ProcessorChain(DemoTopic.INPUT, parent=widget, auto_gate=False)
+            ProcessorGraph(DemoTopic.INPUT, parent=widget, auto_gate=False)
             .parallel(DoubleProcessor)
             .local(AddOneProcessor)
             .connect(results.append)
@@ -110,3 +120,34 @@ def test_mixed_chain_integration(qtbot):
 
     assert 11.0 in results
     assert 21.0 in results
+
+
+def test_branch_graph_integration(qtbot):
+    from qtpy import QtWidgets
+
+    from ezmsg.qt import EzPublisher
+    from ezmsg.qt import EzSession
+    from ezmsg.qt import ProcessorGraph
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    session = EzSession()
+    widget = QtWidgets.QWidget()
+    qtbot.addWidget(widget)
+
+    main_results: list[float] = []
+    branch_results: list[float] = []
+
+    pub = EzPublisher(DemoTopic.INPUT, parent=widget, session=session)
+    (
+        ProcessorGraph(DemoTopic.INPUT, parent=widget, auto_gate=False)
+        .local(DoubleProcessor)
+        .connect(main_results.append)
+        .branch(lambda path: path.local(HalfProcessor).connect(branch_results.append))
+        .attach(session)
+    )
+
+    with session:
+        qtbot.wait(250)
+        pub.emit(8.0)
+        qtbot.waitUntil(lambda: main_results == [16.0], timeout=2000)
+        qtbot.waitUntil(lambda: branch_results == [8.0], timeout=2000)

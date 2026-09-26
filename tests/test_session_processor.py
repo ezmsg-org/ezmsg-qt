@@ -1,4 +1,4 @@
-"""Tests for processor pipeline attachment."""
+"""Tests for processor graph attachment."""
 
 from collections.abc import AsyncGenerator
 from enum import Enum
@@ -6,7 +6,7 @@ from enum import Enum
 import ezmsg.core as ez
 from qtpy import QtWidgets
 
-from ezmsg.qt.chain import ProcessorChain
+from ezmsg.qt.chain import ProcessorGraph
 from ezmsg.qt.session import EzSession
 
 
@@ -24,18 +24,18 @@ class DoubleProcessor(ez.Unit):
         yield self.OUTPUT, msg * 2
 
 
-def test_session_registers_chains(qtbot):
-    """EzSession attaches fully configured pipelines explicitly."""
+def test_session_registers_graphs(qtbot):
+    """EzSession attaches fully configured graphs explicitly."""
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     session = EzSession()
 
     received = []
-    chain = (
-        ProcessorChain(DemoTopic.INPUT, parent=None)
+    graph = (
+        ProcessorGraph(DemoTopic.INPUT, parent=None)
         .local(DoubleProcessor)
         .connect(received.append)
         .attach(session)
     )
 
-    assert chain.session is session
-    assert chain.attached is True
+    assert graph.session is session
+    assert graph.attached is True

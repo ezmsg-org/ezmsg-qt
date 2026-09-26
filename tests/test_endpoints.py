@@ -4,6 +4,7 @@ from enum import Enum
 from typing import cast
 
 import pytest
+from qtpy import QtCore
 from qtpy import QtWidgets
 
 from ezmsg.qt import EzPublisher
@@ -65,6 +66,25 @@ def test_subscriber_switch_requires_running_session(qtbot):
         sub.clear_topic()
 
     assert sub.topic == DemoTopic.INPUT
+
+
+def test_subscriber_auto_gate_requires_widget_parent():
+    parent = QtCore.QObject()
+
+    with pytest.raises(TypeError, match="QWidget parent"):
+        EzSubscriber(DemoTopic.INPUT, parent=parent, auto_gate=True)
+
+
+def test_subscriber_auto_gate_requires_widget_at_runtime(qtbot):
+    session = EzSession()
+    EzSubscriber(DemoTopic.INPUT, auto_gate=True, session=session)
+
+    with pytest.raises(RuntimeError, match="EzSession setup failed") as excinfo:
+        with session:
+            qtbot.wait(10)
+
+    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert "QWidget parent" in str(excinfo.value.__cause__)
 
 
 def test_publisher_switch_requires_running_session(qtbot):

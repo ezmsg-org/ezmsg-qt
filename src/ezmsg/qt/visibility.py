@@ -1,4 +1,4 @@
-"""Visibility tracking for auto-gating processor chains."""
+"""Visibility tracking for auto-gating processor graphs."""
 
 from collections.abc import Callable
 

@@ -9,6 +9,7 @@ from typing import get_args
 from typing import get_origin
 from typing import get_type_hints
 
+from qtpy import QtCore
 from qtpy import QtWidgets
 
 
@@ -128,6 +129,8 @@ def _set_widget_value(widget: QtWidgets.QWidget, typ: type[Any], value: Any) -> 
 
 
 class SettingsForm(QtWidgets.QWidget):
+    settings_changed = QtCore.Signal()  # pyright: ignore[reportPrivateImportUsage]
+
     def __init__(
         self,
         settings_type: type[Any],
@@ -138,8 +141,22 @@ class SettingsForm(QtWidgets.QWidget):
         self._settings_type = settings_type
         self._specs = _iter_settings_fields(settings_type)
         self._widgets: dict[str, QtWidgets.QWidget] = {}
+        self._updating = False
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Maximum,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
 
         layout = QtWidgets.QFormLayout()
+        layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+        )
+        layout.setFormAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignTop
+        )
+        layout.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         self.setLayout(layout)
 
         for spec in self._specs:
@@ -150,9 +167,15 @@ class SettingsForm(QtWidgets.QWidget):
                 for member in spec.typ:
                     widget.addItem(member.name, member)
 
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Maximum,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+
             self._widgets[spec.name] = widget
             layout.addRow(spec.name, widget)
 
+        self._updating = True
         if initial is not None:
             self.set_settings(initial)
         else:
@@ -163,6 +186,10 @@ class SettingsForm(QtWidgets.QWidget):
                     _set_widget_value(self._widgets[spec.name], spec.typ, spec.default)
                 except Exception:
                     pass
+        self._updating = False
+
+        for spec in self._specs:
+            self._connect_widget(spec, self._widgets[spec.name])
 
     @property
     def settings_type(self) -> type[Any]:
@@ -177,8 +204,39 @@ class SettingsForm(QtWidgets.QWidget):
         return self._settings_type(**values)
 
     def set_settings(self, settings: Any) -> None:
+        self._updating = True
         for spec in self._specs:
             if not hasattr(settings, spec.name):
                 continue
             value = getattr(settings, spec.name)
             _set_widget_value(self._widgets[spec.name], spec.typ, value)
+        self._updating = False
+
+    def _connect_widget(
+        self,
+        spec: SettingsFieldSpec,
+        widget: QtWidgets.QWidget,
+    ) -> None:
+        if spec.typ is bool:
+            assert isinstance(widget, QtWidgets.QCheckBox)
+            widget.toggled.connect(self._emit_settings_changed)
+            return
+        if spec.typ is int:
+            assert isinstance(widget, QtWidgets.QSpinBox)
+            widget.valueChanged.connect(self._emit_settings_changed)
+            return
+        if spec.typ is float:
+            assert isinstance(widget, QtWidgets.QDoubleSpinBox)
+            widget.valueChanged.connect(self._emit_settings_changed)
+            return
+        if spec.typ is str:
+            assert isinstance(widget, QtWidgets.QLineEdit)
+            widget.textChanged.connect(self._emit_settings_changed)
+            return
+        if isinstance(spec.typ, type) and issubclass(spec.typ, Enum):
+            assert isinstance(widget, QtWidgets.QComboBox)
+            widget.currentIndexChanged.connect(self._emit_settings_changed)
+
+    def _emit_settings_changed(self, *_args: Any) -> None:
+        if not self._updating:
+            self.settings_changed.emit()

@@ -1,4 +1,4 @@
-"""Gate unit for controlling message flow in processor chains."""
+"""Gate unit for controlling message flow in processor graphs."""
 
 import logging
 from collections.abc import AsyncGenerator
@@ -51,9 +51,7 @@ class MessageGate(ez.Unit):
     @ez.subscriber(INPUT_GATE)
     async def on_gate(self, msg: GateMessage) -> None:
         """Handle gate control messages."""
-        old_state = self.STATE.is_open
         self.STATE.is_open = msg.open
-        logger.info(f"Gate state changed: {old_state} -> {msg.open}")
 
     @ez.subscriber(INPUT)
     @ez.publisher(OUTPUT)

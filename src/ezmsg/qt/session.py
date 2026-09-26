@@ -8,6 +8,7 @@ import signal
 import socket
 import threading
 import weakref
+from collections.abc import Callable
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any
@@ -23,11 +24,12 @@ from qtpy import QtWidgets
 
 from .gate import GateMessage
 from .sidecar import build_sidecar_components
-from .sidecar import CompiledPipeline
+from .sidecar import CompiledGraph
+from .sidecar import CompiledSink
 from .sidecar import normalize_topic
 
 if TYPE_CHECKING:
-    from .chain import ProcessorChain
+    from .chain import ProcessorGraph
     from .publisher import EzPublisher
     from .subscriber import EzSubscriber
 
@@ -43,6 +45,7 @@ class _SubscriberRuntime:
     client: Any | None = None
     task: asyncio.Task[None] | None = None
     active_topic: str | None = None
+    gate_open: bool = True
 
 
 @dataclass
@@ -55,9 +58,9 @@ class _PublisherRuntime:
 
 @dataclass
 class _PipelineRuntime:
-    compiled: CompiledPipeline
-    client: Any
-    task: asyncio.Task[None]
+    compiled: CompiledGraph
+    sink_clients: list[Any]
+    sink_tasks: list[asyncio.Task[None]]
     gate_publisher: Any | None = None
 
 
@@ -78,7 +81,7 @@ class _QtSignalDispatcher(QtCore.QObject):
 
 
 class EzSession:
-    """Runtime owner for Qt/ezmsg endpoints and pipelines."""
+    """Runtime owner for Qt/ezmsg endpoints and processor graphs."""
 
     def __init__(
         self,
@@ -100,13 +103,13 @@ class EzSession:
 
         self._subscribers: dict[int, EzSubscriber] = {}
         self._publishers: dict[int, EzPublisher] = {}
-        self._pipelines: dict[int, ProcessorChain] = {}
+        self._pipelines: dict[int, ProcessorGraph] = {}
 
         self._subscriber_runtime: dict[int, _SubscriberRuntime] = {}
         self._publisher_runtime: dict[int, _PublisherRuntime] = {}
         self._pipeline_runtime: dict[int, _PipelineRuntime] = {}
 
-        self._compiled_pipelines: list[CompiledPipeline] = []
+        self._compiled_pipelines: list[CompiledGraph] = []
         self._sidecar: GraphRunner | None = None
         self._chain_counter = 0
         self._topic_prefix = f"_qt.{id(self):x}"
@@ -131,8 +134,8 @@ class EzSession:
         return self._graph_address
 
     def attach(self, attachable):
-        """Attach a subscriber, publisher, or processor pipeline to this session."""
-        from .chain import ProcessorChain
+        """Attach a subscriber, publisher, or processor graph to this session."""
+        from .chain import ProcessorGraph
         from .publisher import EzPublisher
         from .subscriber import EzSubscriber
 
@@ -140,7 +143,7 @@ class EzSession:
             self._attach_subscriber(attachable)
         elif isinstance(attachable, EzPublisher):
             self._attach_publisher(attachable)
-        elif isinstance(attachable, ProcessorChain):
+        elif isinstance(attachable, ProcessorGraph):
             self._attach_pipeline(attachable)
         else:
             raise TypeError(f"Unsupported attachable type: {type(attachable)!r}")
@@ -223,21 +226,19 @@ class EzSession:
             timeout=_TOPIC_SWITCH_TIMEOUT,
         )
 
-    def _attach_pipeline(self, chain: ProcessorChain) -> None:
-        key = id(chain)
+    def _attach_pipeline(self, graph: "ProcessorGraph") -> None:
+        key = id(graph)
         if key in self._pipelines:
             return
         if self._running:
-            raise RuntimeError(
-                "Processor pipelines must be attached before session start"
-            )
+            raise RuntimeError("Processor graphs must be attached before session start")
 
-        chain._validate()
-        chain._bind_session(self)
-        if chain._chain_id is None:
-            chain._chain_id = f"chain_{self._chain_counter}"
+        graph._validate()
+        graph._bind_session(self)
+        if graph._graph_id is None:
+            graph._graph_id = f"graph_{self._chain_counter}"
             self._chain_counter += 1
-        self._pipelines[key] = chain
+        self._pipelines[key] = graph
 
     def _bind_destroyed(self, obj: QtCore.QObject, callback, key: int) -> None:
         obj.destroyed.connect(lambda *_args, _key=key: callback(_key))
@@ -387,16 +388,16 @@ class EzSession:
     def _prepare_sidecar(self) -> None:
         """Start the sidecar runner before entering the session graph context.
 
-        This runs after the session graph context is ready, so sidecar pipelines
+        This runs after the session graph context is ready, so sidecar graphs
         join the same graph without replacing the session GraphContext.
         """
-        pipelines = list(self._pipelines.values())
-        if not pipelines:
+        graphs = list(self._pipelines.values())
+        if not graphs:
             self._compiled_pipelines = []
             return
 
-        components, connections, process_components, compiled_pipelines = (
-            build_sidecar_components(pipelines, topic_prefix=self._topic_prefix)
+        components, connections, process_components, compiled_graphs = (
+            build_sidecar_components(graphs, topic_prefix=self._topic_prefix)
         )
         runner = GraphRunner(
             components=components,
@@ -406,7 +407,7 @@ class EzSession:
         )
         runner.start()
         self._sidecar = runner
-        self._compiled_pipelines = compiled_pipelines
+        self._compiled_pipelines = compiled_graphs
 
     @staticmethod
     def _subscriber_client_kwargs(ez_sub: EzSubscriber) -> dict[str, object]:
@@ -440,9 +441,83 @@ class EzSession:
 
         runtime = _SubscriberRuntime(switch_lock=asyncio.Lock())
         self._subscriber_runtime[key] = runtime
+        try:
+            self._configure_subscriber_auto_gate(ez_sub, runtime)
 
-        if ez_sub._desired_topic is not None:
-            await self._switch_subscriber(ez_sub, ez_sub._desired_topic)
+            if ez_sub._desired_topic is not None:
+                await self._switch_subscriber(ez_sub, ez_sub._desired_topic)
+        except Exception:
+            self._subscriber_runtime.pop(key, None)
+            if ez_sub.auto_gate:
+                self._dispatch(self._clear_visibility_gate, ez_sub)
+            raise
+
+    def _configure_subscriber_auto_gate(
+        self, ez_sub: EzSubscriber, runtime: _SubscriberRuntime
+    ) -> None:
+        if not ez_sub.auto_gate:
+            runtime.gate_open = True
+            return
+
+        widget = ez_sub.parent_widget
+        if widget is None:
+            raise TypeError("EzSubscriber auto_gate requires a QWidget parent")
+
+        runtime.gate_open = widget.isVisible()
+        self._dispatch(self._setup_subscriber_auto_gate, ez_sub)
+
+    def _setup_subscriber_auto_gate(self, ez_sub: EzSubscriber) -> None:
+        widget = ez_sub.parent_widget
+        runtime = self._subscriber_runtime.get(id(ez_sub))
+        if widget is None or runtime is None:
+            return
+
+        visible = widget.isVisible()
+        if runtime.gate_open != visible:
+            if not visible:
+                ez_sub._emit_epoch += 1
+            runtime.gate_open = visible
+
+        subscriber_ref = weakref.ref(ez_sub)
+
+        def on_visibility(visible: bool) -> None:
+            current_sub = subscriber_ref()
+            if current_sub is None:
+                return
+
+            current_runtime = self._subscriber_runtime.get(id(current_sub))
+            if current_runtime is None or current_runtime.gate_open == visible:
+                return
+
+            if not visible:
+                current_sub._emit_epoch += 1
+            current_runtime.gate_open = visible
+
+        self._install_visibility_gate(ez_sub, widget, on_visibility)
+
+    def _install_visibility_gate(
+        self,
+        owner: object,
+        widget: QtWidgets.QWidget,
+        callback: Callable[[bool], None],
+    ) -> None:
+        from .visibility import VisibilityFilter
+
+        self._clear_visibility_gate(owner)
+        event_filter = VisibilityFilter(callback, parent=widget)
+        widget.installEventFilter(event_filter)
+        setattr(owner, "_visibility_filter", event_filter)
+
+    def _clear_visibility_gate(self, owner: object) -> None:
+        event_filter = getattr(owner, "_visibility_filter", None)
+        if event_filter is None:
+            return
+
+        parent = event_filter.parent()
+        if isinstance(parent, QtWidgets.QWidget):
+            parent.removeEventFilter(event_filter)
+        event_filter.deleteLater()
+        setattr(owner, "_visibility_filter", None)
 
     async def _switch_subscriber(self, ez_sub: EzSubscriber, topic) -> None:
         key = id(ez_sub)
@@ -534,59 +609,68 @@ class EzSession:
             ez_pub._topic = topic
             ez_pub._desired_topic = topic
 
-    async def _setup_pipeline_runtime(self, compiled: CompiledPipeline) -> None:
-        key = id(compiled.chain)
-        client = await self._create_subscriber_client(compiled.output_topic)
-        task = asyncio.create_task(
-            self._pipeline_output_loop(compiled, client),
-            name=f"pipeline-{compiled.chain._chain_id}",
-        )
-        self._track_task(task)
+    async def _setup_pipeline_runtime(self, compiled: CompiledGraph) -> None:
+        key = id(compiled.graph)
+        sink_clients: list[Any] = []
+        sink_tasks: list[asyncio.Task[None]] = []
+        for sink in compiled.sinks:
+            client = await self._create_subscriber_client(sink.topic)
+            task = asyncio.create_task(
+                self._pipeline_output_loop(compiled, sink, client),
+                name=f"graph-{compiled.graph._graph_id}-{sink.sink_id}",
+            )
+            self._track_task(task)
+            sink_clients.append(client)
+            sink_tasks.append(task)
 
         gate_publisher = None
-        chain = compiled.chain
-        if chain.auto_gate and chain.parent_widget is not None:
+        graph = compiled.graph
+        if (
+            graph.auto_gate
+            and graph.parent_widget is not None
+            and compiled.gate_topic is not None
+        ):
             gate_publisher = await self._create_publisher_client(compiled.gate_topic)
             await gate_publisher.broadcast(
-                GateMessage(open=chain.parent_widget.isVisible())
+                GateMessage(open=graph.parent_widget.isVisible())
             )
-            self._dispatch(self._setup_auto_gate, chain)
+            self._dispatch(self._setup_auto_gate, graph)
 
         self._pipeline_runtime[key] = _PipelineRuntime(
             compiled=compiled,
-            client=client,
-            task=task,
+            sink_clients=sink_clients,
+            sink_tasks=sink_tasks,
             gate_publisher=gate_publisher,
         )
 
-    def _setup_auto_gate(self, chain: ProcessorChain) -> None:
-        from .visibility import VisibilityFilter
-
-        widget = chain.parent_widget
+    def _setup_auto_gate(self, graph: "ProcessorGraph") -> None:
+        widget = graph.parent_widget
         if widget is None:
             return
 
-        chain_ref = weakref.ref(chain)
+        graph_ref = weakref.ref(graph)
 
         def on_visibility(visible: bool) -> None:
-            current_chain = chain_ref()
-            if current_chain is None or self._loop is None or not self._running:
+            current_graph = graph_ref()
+            if current_graph is None or self._loop is None or not self._running:
                 return
             asyncio.run_coroutine_threadsafe(
-                self._send_gate_message(current_chain, visible), self._loop
+                self._send_gate_message(current_graph, visible), self._loop
             )
 
-        event_filter = VisibilityFilter(on_visibility, parent=widget)
-        widget.installEventFilter(event_filter)
-        chain._visibility_filter = event_filter
+        self._install_visibility_gate(graph, widget, on_visibility)
 
-    async def _send_gate_message(self, chain: ProcessorChain, open: bool) -> None:
-        runtime = self._pipeline_runtime.get(id(chain))
+    async def _send_gate_message(self, graph: "ProcessorGraph", open: bool) -> None:
+        runtime = self._pipeline_runtime.get(id(graph))
         if runtime is None or runtime.gate_publisher is None:
             return
         await runtime.gate_publisher.broadcast(GateMessage(open=open))
 
     async def _subscriber_loop(self, ez_sub: EzSubscriber, sub) -> None:
+        runtime = self._subscriber_runtime.get(id(ez_sub))
+        if runtime is None:
+            raise RuntimeError("Subscriber runtime is not initialized")
+
         rate = None
         if ez_sub.throttle_hz is not None:
             from ezmsg.util.rate import Rate
@@ -597,8 +681,9 @@ class EzSession:
             while self._running:
                 epoch = ez_sub._emit_epoch
                 msg = await sub.recv()
-                self._dispatch(ez_sub._on_message, msg, epoch)
-                if rate is not None:
+                if runtime.gate_open:
+                    self._dispatch(ez_sub._on_message, msg, epoch)
+                if runtime.gate_open and rate is not None:
                     await rate.sleep()
         except asyncio.CancelledError:
             logger.debug("Subscriber loop cancelled for %s", ez_sub.topic)
@@ -615,16 +700,17 @@ class EzSession:
         except Exception:
             logger.exception("Error in publisher loop for %s", ez_pub.topic)
 
-    async def _pipeline_output_loop(self, compiled: CompiledPipeline, sub) -> None:
+    async def _pipeline_output_loop(
+        self, compiled: CompiledGraph, sink: CompiledSink, sub
+    ) -> None:
         try:
             while self._running:
                 msg = await sub.recv()
-                if compiled.chain.handler is not None:
-                    self._dispatch(compiled.chain.handler, msg)
+                self._dispatch(sink.slot, msg)
         except asyncio.CancelledError:
-            logger.debug("Pipeline loop cancelled for %s", compiled.chain._chain_id)
+            logger.debug("Graph loop cancelled for %s", compiled.graph._graph_id)
         except Exception:
-            logger.exception("Error in pipeline loop for %s", compiled.chain._chain_id)
+            logger.exception("Error in graph loop for %s", compiled.graph._graph_id)
 
     def _start_subscriber_task(
         self, ez_sub: EzSubscriber, runtime: _SubscriberRuntime
@@ -729,6 +815,7 @@ class EzSession:
         await self._close_subscriber_client(runtime)
 
         if subscriber is not None:
+            self._dispatch(self._clear_visibility_gate, subscriber)
             subscriber._sub = None
             subscriber._topic = None
             subscriber._desired_topic = None
@@ -745,10 +832,14 @@ class EzSession:
             publisher._desired_topic = None
 
     async def _close_pipeline_runtime(self, runtime: _PipelineRuntime) -> None:
-        runtime.task.cancel()
-        await asyncio.gather(runtime.task, return_exceptions=True)
-        runtime.client.close()
-        await runtime.client.wait_closed()
+        self._dispatch(self._clear_visibility_gate, runtime.compiled.graph)
+        for task in runtime.sink_tasks:
+            task.cancel()
+        if runtime.sink_tasks:
+            await asyncio.gather(*runtime.sink_tasks, return_exceptions=True)
+        for client in runtime.sink_clients:
+            client.close()
+            await client.wait_closed()
         if runtime.gate_publisher is not None:
             runtime.gate_publisher.close()
             await runtime.gate_publisher.wait_closed()
