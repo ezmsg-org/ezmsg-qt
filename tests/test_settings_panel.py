@@ -102,5 +102,13 @@ def test_processor_settings_panel_applies_settings_and_tracks_dirty_state(qtbot)
         qtbot.waitUntil(lambda: not apply_button.isEnabled(), timeout=1000)
         assert section.title() == "gain"
 
-        input_pub.emit(2.0)
-        qtbot.waitUntil(lambda: received[-1] == 10.0, timeout=2000)
+        # Settings and samples travel on independent asynchronous topics. The
+        # disabled button means the update was queued, not that the processor
+        # has received it. Keep streaming samples until the new gain is seen.
+        samples = QtCore.QTimer(host)
+        samples.timeout.connect(lambda: input_pub.emit(2.0))
+        samples.start(20)
+        try:
+            qtbot.waitUntil(lambda: received[-1] == 10.0, timeout=2000)
+        finally:
+            samples.stop()
