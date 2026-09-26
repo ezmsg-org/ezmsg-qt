@@ -9,11 +9,11 @@ from enum import Enum
 from typing import Any
 from typing import cast
 from typing import Literal
-from typing import Self
 from typing import TYPE_CHECKING
 
 import ezmsg.core as ez
 from qtpy import QtWidgets
+from typing_extensions import Self
 
 if TYPE_CHECKING:
     from .session import EzSession

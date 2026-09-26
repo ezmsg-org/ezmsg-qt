@@ -11,6 +11,7 @@ dynamic = ["version"]
 dependencies = [
     "ezmsg>=3.10.0b4",
     "qtpy>=2.4.1",
+    "typing-extensions>=4.0",
 ]
 
 [project.optional-dependencies]
