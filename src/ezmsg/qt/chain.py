@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-import re
 from typing import Any
 from typing import cast
 from typing import Literal
@@ -217,14 +217,16 @@ class ProcessorGraph(ProcessorPath):
     def settings_bindings(self) -> list[ProcessorSettingsBinding]:
         if self._session is None or self._graph_id is None:
             raise RuntimeError(
-                "ProcessorGraph must be attached to a session before reading settings bindings"
+                "ProcessorGraph must be attached to a session "
+                "before reading settings bindings"
             )
         return self._collect_settings_bindings(self._session._topic_prefix)
 
     def input_bindings(self) -> list[ProcessorInputBinding]:
         if self._session is None or self._graph_id is None:
             raise RuntimeError(
-                "ProcessorGraph must be attached to a session before reading input bindings"
+                "ProcessorGraph must be attached to a session "
+                "before reading input bindings"
             )
         return self._collect_input_bindings(self._session._topic_prefix)
 
@@ -273,7 +275,8 @@ class ProcessorGraph(ProcessorPath):
                 for spec in stage.processors:
                     if not _is_process_safe(spec):
                         raise TypeError(
-                            "parallel() only supports ez.Unit classes, ez.Unit instances, "
+                            "parallel() only supports ez.Unit classes, "
+                            "ez.Unit instances, "
                             "or (UnitClass, Settings) tuples"
                         )
             known_refs.add(stage.stage_id)

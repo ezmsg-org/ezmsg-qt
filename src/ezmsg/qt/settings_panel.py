@@ -12,7 +12,6 @@ from .publisher import EzPublisher
 from .session import EzSession
 from .settings_form import SettingsForm
 
-
 _DIRTY_SECTION_STYLE = (
     "QGroupBox {"
     " border: 1px solid #c77d00;"
@@ -30,7 +29,8 @@ _DIRTY_SECTION_STYLE = (
 )
 _DIRTY_BUTTON_STYLE = (
     "QPushButton { background: #fff2cc; border: 1px solid #c77d00; }"
-    "QPushButton:disabled { color: #888888; background: #f0f0f0; border: 1px solid #cccccc; }"
+    "QPushButton:disabled { color: #888888; background: #f0f0f0; "
+    "border: 1px solid #cccccc; }"
 )
 
 
@@ -94,7 +94,8 @@ class ProcessorSettingsPanel(QtWidgets.QWidget):
         resolved_session = graph.session if session is None else session
         if resolved_session is None:
             raise RuntimeError(
-                "ProcessorGraph must be attached to a session before building settings UI"
+                "ProcessorGraph must be attached to a session "
+                "before building settings UI"
             )
         if graph.session is not None and graph.session is not resolved_session:
             raise RuntimeError(
@@ -102,7 +103,8 @@ class ProcessorSettingsPanel(QtWidgets.QWidget):
             )
         if graph.session is None:
             raise RuntimeError(
-                "ProcessorGraph must be attached to a session before building settings UI"
+                "ProcessorGraph must be attached to a session "
+                "before building settings UI"
             )
         return cls(graph, resolved_session, parent=parent)
 
