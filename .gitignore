@@ -70,6 +70,13 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
+# Sphinx documentation
+docs/_build/
+docs/build/
+docs/source/_build
+docs/source/generated
+docs/source/api/generated
+
 # Project specific
 uv.lock
 .ruff_cache/

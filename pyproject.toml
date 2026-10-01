@@ -33,6 +33,14 @@ test = [
   "pytest>=7.0.0",
   "pytest-qt>=4.0.0",
 ]
+docs = [
+  "sphinx>=8.0",
+  "pydata-sphinx-theme",
+  "sphinx-autodoc-typehints",
+  "sphinx-copybutton",
+  "myst-parser",
+  "pyside6>=6.0.0",  # Qt binding so autodoc can import ezmsg.qt
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
